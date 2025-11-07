@@ -112,6 +112,7 @@ app.post("/api/members", authenticateToken, async (req, res) => {
       return res.status(400).json({ error: "Missing name, email, or password" });
     }
     const hashedPassword = await bcrypt.hash(password, 10);
+    console.log(`New member email: ${email}, Hashed Password: ${hashedPassword}`); // Add this line for debugging
     const result = await db.collection("members").insertOne({ name, email, password: hashedPassword, createdAt: new Date() });
     res.status(201).json({ success: true, message: "Member added.", memberId: result.insertedId });
   } catch (err) {
