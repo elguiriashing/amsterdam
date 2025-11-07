@@ -4,8 +4,37 @@ import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import dotenv from "dotenv";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import fetch from 'node-fetch'; // Import node-fetch
 
-const JWT_SECRET = process.env.JWT_SECRET || "supersecretjwtkey"; // Fallback for dev, use .env in production
+// --- Environment Variables (loaded from Railway) ---
+const ADMIN_PASS = process.env.ADMIN_PASS;
+const JWT_SECRET = process.env.JWT_SECRET;
+const MONGO_URI = process.env.MONGO_URI;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// --- Telegram Notification Helper ---
+async function sendTelegramNotification(message) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.warn("Telegram bot token or chat ID not configured. Skipping notification.");
+    return;
+  }
+  const telegramApiUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  try {
+    await fetch(telegramApiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message,
+        parse_mode: 'HTML',
+      }),
+    });
+    console.log("Telegram notification sent successfully.");
+  } catch (error) {
+    console.error("Failed to send Telegram notification:", error);
+  }
+}
 
 dotenv.config();
 
@@ -279,6 +308,11 @@ app.post("/api/prefill", async (req, res) => {
     const { fullname, phone, email, ts } = req.body;
     // Save pre-fill data to a new 'prefills' collection
     await db.collection("prefills").insertOne({ fullname, phone, email, ts: new Date(ts), status: "pending" });
+    
+    // Send Telegram notification
+    const notificationMessage = `<b>New Prefill Request!</b>\n\n<b>Name:</b> ${fullname}\n<b>Email:</b> ${email}\n<b>Phone:</b> ${phone}\n<b>Received:</b> ${new Date(ts).toLocaleString()}\n\nView in Admin Panel: your-admin-panel-url`; // Replace with actual URL
+    await sendTelegramNotification(notificationMessage);
+
     res.status(200).send("Pre-fill data received");
   } catch (err) {
     console.error("Error saving pre-fill data:", err);
