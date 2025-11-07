@@ -276,13 +276,39 @@ app.post("/api/update-content", authenticateToken, async (req, res) => {
 // 🧠 Prefill Memberships (public bluff form)
 app.post("/api/prefill", async (req, res) => {
   try {
-    const entry = req.body;
-    if (!entry.fullname) return res.status(400).json({ error: "Missing fullname" });
-
-    await db.collection("prefills").insertOne({ ...entry, receivedAt: new Date() });
-    res.json({ success: true, message: "Membership prefill recorded" });
+    const { fullname, phone, email, ts } = req.body;
+    // Save pre-fill data to a new 'prefills' collection
+    await db.collection("prefills").insertOne({ fullname, phone, email, ts: new Date(ts), status: "pending" });
+    res.status(200).send("Pre-fill data received");
   } catch (err) {
-    res.status(500).json({ error: "Failed to record prefill", details: err });
+    console.error("Error saving pre-fill data:", err);
+    res.status(500).send("Error saving pre-fill data");
+  }
+});
+
+// ADMIN ONLY: Get all pre-fills
+app.get("/api/prefills", authenticateToken, async (req, res) => {
+  try {
+    const prefillData = await db.collection("prefills").find({}).sort({ ts: -1 }).toArray();
+    res.json(prefillData);
+  } catch (err) {
+    console.error("Error fetching pre-fills:", err);
+    res.status(500).send("Error fetching pre-fills");
+  }
+});
+
+// ADMIN ONLY: Delete a pre-fill
+app.delete("/api/prefills/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await db.collection("prefills").deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) {
+      return res.status(404).send("Pre-fill not found");
+    }
+    res.status(200).send("Pre-fill deleted");
+  } catch (err) {
+    console.error("Error deleting pre-fill:", err);
+    res.status(500).send("Error deleting pre-fill");
   }
 });
 
