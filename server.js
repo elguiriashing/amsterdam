@@ -76,6 +76,11 @@ app.post("/api/login", async (req, res) => {
     return res.status(400).send("Cannot find member");
   }
 
+  // Check for expired membership
+  if (member.membershipEndDate && new Date(member.membershipEndDate) < new Date()) {
+    return res.status(403).send("Membership expired");
+  }
+
   try {
     if (await bcrypt.compare(password, member.password)) {
       const token = generateToken(member);
@@ -95,7 +100,12 @@ app.get("/api/members", authenticateToken, async (req, res) => {
   }
   try {
     const members = await db.collection("members").find().toArray();
-    res.json(members);
+    // Add a check for membership expiry here before sending to frontend
+    const membersWithExpiryStatus = members.map(member => ({
+      ...member,
+      isExpired: new Date(member.membershipEndDate) < new Date()
+    }));
+    res.json(membersWithExpiryStatus);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch members", details: err });
   }
@@ -113,7 +123,11 @@ app.post("/api/members", authenticateToken, async (req, res) => {
     }
     const hashedPassword = await bcrypt.hash(password, 10);
     console.log(`New member email: ${email}, Hashed Password: ${hashedPassword}`); // Add this line for debugging
-    const result = await db.collection("members").insertOne({ name, email, password: hashedPassword, createdAt: new Date() });
+    
+    const membershipEndDate = new Date();
+    membershipEndDate.setFullYear(membershipEndDate.getFullYear() + 1);
+
+    const result = await db.collection("members").insertOne({ name, email, password: hashedPassword, createdAt: new Date(), membershipEndDate });
     res.status(201).json({ success: true, message: "Member added.", memberId: result.insertedId });
   } catch (err) {
     res.status(500).json({ error: "Failed to add member", details: err });
@@ -131,6 +145,31 @@ app.delete("/api/members/:id", authenticateToken, async (req, res) => {
     res.json({ success: true, message: "Member deleted successfully" });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete member", details: err });
+  }
+});
+
+// ✏️ Update a member (Admin only)
+app.put("/api/members/:id", authenticateToken, async (req, res) => {
+  if (req.user.id !== 'admin') {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+  try {
+    const id = req.params.id;
+    const { name, email, membershipEndDate } = req.body;
+
+    if (!name || !email || !membershipEndDate) {
+      return res.status(400).json({ error: "Missing name, email, or membership end date" });
+    }
+
+    // Note: Password changes should ideally be handled via a separate, secure flow.
+    // Here, we're only allowing name, email, and membershipEndDate to be updated.
+    await db.collection("members").updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { name, email, membershipEndDate: new Date(membershipEndDate), updatedAt: new Date() } }
+    );
+    res.json({ success: true, message: "Member updated." });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update member", details: err });
   }
 });
 
