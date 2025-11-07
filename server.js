@@ -310,7 +310,7 @@ app.post("/api/prefill", async (req, res) => {
     await db.collection("prefills").insertOne({ fullname, phone, email, ts: new Date(ts), status: "pending" });
     
     // Send Telegram notification
-    const notificationMessage = `<b>New Prefill Request!</b>\n\n<b>Name:</b> ${fullname}\n<b>Email:</b> ${email}\n<b>Phone:</b> ${phone}\n<b>Received:</b> ${new Date(ts).toLocaleString()}\n\nView in Admin Panel: your-admin-panel-url`; // Replace with actual URL
+    const notificationMessage = `📥<b>New Web Membership Prefill!</b>📥\n\n<b>Name:</b> ${fullname}\n<b>Email:</b> ${email}\n<b>Phone:</b> ${phone}\n<b>Received:</b> ${new Date(ts).toLocaleString()}\n\n📱<b>Check it out in the panel</b>📱\nhttps://blueelephantstudio.pages.dev/admin`;
     await sendTelegramNotification(notificationMessage);
 
     res.status(200).send("Pre-fill data received");
