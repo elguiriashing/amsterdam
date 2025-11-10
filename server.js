@@ -22,25 +22,45 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 // --- Telegram Notification Helper ---
-async function sendTelegramNotification(message) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.warn("Telegram bot token or chat ID not configured. Skipping notification.");
-    return;
-  }
-  const telegramApiUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+export async function sendTelegramNotification(text) {
   try {
-    await fetch(telegramApiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    // Send message
+    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: TELEGRAM_CHAT_ID,
-        text: message,
-        parse_mode: 'HTML',
+        text,
+        parse_mode: "HTML",
       }),
     });
-    console.log("Telegram notification sent successfully.");
-  } catch (error) {
-    console.error("Failed to send Telegram notification:", error);
+
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.description);
+
+    const messageId = data.result.message_id;
+
+    // Schedule self-destruct (48 hours)
+    setTimeout(async () => {
+      try {
+        await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: TELEGRAM_CHAT_ID,
+            message_id: messageId,
+          }),
+        });
+        console.log(`💥 Auto-deleted Telegram message ${messageId}`);
+      } catch (err) {
+        console.error(`❌ Failed to delete Telegram message ${messageId}:`, err.message);
+      }
+    }, 48 * 60 * 60 * 1000); // 48h
+
+    return true;
+  } catch (err) {
+    console.error("Error sending Telegram notification:", err);
+    return false;
   }
 }
 
