@@ -7,7 +7,7 @@ import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import fetch from 'node-fetch';
-import "./services/telegramWiper.js"; // now can access process.env
+import "./services/telegramwiper.js"; // now can access process.env
 
 
 
