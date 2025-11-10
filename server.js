@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import fetch from 'node-fetch'; // Import node-fetch
-import "./services/telegramWiper.js";
+import "./services/telegramwiper.js";
 
 
 // --- Environment Variables (loaded from Railway) ---
