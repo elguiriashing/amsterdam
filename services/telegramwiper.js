@@ -1,100 +1,61 @@
-import { Telegraf } from "telegraf";
-import cron from "node-cron";
+// services/telegramwiper.js
+import fetch from "node-fetch";
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 export default async function startTelegramBot() {
-  console.log("🚀 Starting Telegram Wiper Bot...");
-
-  if (!BOT_TOKEN || !CHAT_ID) {
-    console.error("❌ TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing!");
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.warn("🚨 Telegram bot token or chat ID missing!");
     return;
   }
 
-  console.log("🔹 TELEGRAM_BOT_TOKEN loaded:", !!BOT_TOKEN);
-  console.log("🔹 TELEGRAM_CHAT_ID loaded:", !!CHAT_ID);
+  console.log("🚀 Starting Telegram Wiper Bot...");
 
-  const bot = new Telegraf(BOT_TOKEN);
-  let messageIds = new Set();
-  let pinnedMessageId = null;
+  // Send startup notification
+  await sendTelegramMessage("✅ Telegram Wiper Bot is online!");
 
-  // -------------------- Startup message --------------------
-  async function startupMessage() {
-    console.log("📩 Sending startup message...");
-
+  // Polling updates
+  let offset = 0;
+  setInterval(async () => {
     try {
-      const chat = await bot.telegram.getChat(CHAT_ID);
-      pinnedMessageId = chat.pinned_message?.message_id;
-
-      await bot.telegram.sendMessage(
-        CHAT_ID,
-        "🤖 Bot is online! Ready to wipe messages (pinned preserved)."
+      const res = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=10&offset=${offset + 1}`
       );
+      const data = await res.json();
+      if (!data.ok) return;
 
-      console.log("✅ Startup message sent. Pinned message ID:", pinnedMessageId);
-    } catch (err) {
-      console.error("❌ Failed to send startup message:", err);
-    }
-  }
+      for (const update of data.result) {
+        offset = update.update_id;
 
-  // -------------------- Track all new messages --------------------
-  bot.on("message", (ctx) => {
-    const msgId = ctx.message.message_id;
-    if (msgId !== pinnedMessageId) messageIds.add(msgId);
-  });
+        if (!update.message || !update.message.text) continue;
+        const text = update.message.text.trim();
 
-  // -------------------- Wipe function --------------------
-  async function wipeChat() {
-    if (messageIds.size === 0) {
-      console.log("🧹 No messages to delete.");
-      return;
-    }
-
-    console.log(`🧹 Wiping ${messageIds.size} messages...`);
-
-    for (const id of messageIds) {
-      try {
-        await bot.telegram.deleteMessage(CHAT_ID, id);
-      } catch {
-        // Ignore deletion errors
+        if (text === "/wipe") {
+          await sendTelegramMessage("🧹 Wipe command received! Running wipe...");
+          // Add any wipe logic you want here, e.g., clearing DB, logs, etc.
+          console.log("🧹 /wipe triggered by Telegram");
+        }
       }
-    }
-
-    messageIds.clear();
-    console.log("✅ Chat wiped (pinned message untouched).");
-
-    try {
-      await bot.telegram.sendMessage(CHAT_ID, "🧹 Chat wiped! (Pinned message untouched)");
     } catch (err) {
-      console.error("❌ Failed to send confirmation message:", err);
+      console.error("Telegram polling error:", err);
     }
-  }
+  }, 3000); // poll every 3s
+}
 
-  // -------------------- Cron schedule --------------------
-  // Daily wipe at 03:00 AM
-  cron.schedule("0 3 * * *", () => {
-    console.log("⏰ Running daily wipe...");
-    wipeChat();
-  });
-
-  // -------------------- Manual wipe command --------------------
-  bot.command("wipe", async (ctx) => {
-    if (ctx.chat.id.toString() !== CHAT_ID) return;
-    await ctx.reply("Manual wipe initiated...");
-    await wipeChat();
-  });
-
-  // -------------------- Launch bot --------------------
+// Helper to send messages
+async function sendTelegramMessage(message) {
   try {
-    await bot.launch();
-    console.log("✅ Bot launched successfully!");
-    await startupMessage();
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message,
+        parse_mode: "HTML",
+      }),
+    });
   } catch (err) {
-    console.error("❌ Bot failed to launch:", err);
+    console.error("Failed to send Telegram message:", err);
   }
-
-  // Graceful shutdown
-  process.once("SIGINT", () => bot.stop("SIGINT"));
-  process.once("SIGTERM", () => bot.stop("SIGTERM"));
 }
