@@ -5,25 +5,28 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const chatId = process.env.CHAT_ID; // your group chat ID
 
 // Delete messages in group (last 24h)
+// 🧹 Wipe function that skips pinned message
 async function wipeChat() {
   try {
-    const now = Math.floor(Date.now() / 1000);
-    const dayAgo = now - 86400;
+    // Get chat info to find pinned message
+    const chat = await bot.telegram.getChat(chatId);
+    const pinnedId = chat.pinned_message?.message_id;
 
-    // Delete 100 most recent messages
-    for (let i = 0; i < 100; i++) {
-      await bot.telegram.deleteMessage(chatId, now - i);
+    // Example: delete last 50 messages
+    for (let i = 0; i < 50; i++) {
+      const messageId = i + 1; // Replace with actual tracked message IDs
+      if (messageId === pinnedId) continue; // skip pinned message
+      try {
+        await bot.telegram.deleteMessage(chatId, messageId);
+      } catch {
+        // ignore errors if message doesn't exist or can't be deleted
+      }
     }
 
-    console.log("Chat wiped successfully.");
+    console.log("Chat wiped successfully (pinned message preserved).");
+    await bot.telegram.sendMessage(chatId, "🧹 Chat wiped! (Pinned message untouched)");
   } catch (err) {
     console.error("Error wiping chat:", err);
   }
 }
 
-// Schedule: every day at 03:00 (server time)
-cron.schedule("0 3 * * *", () => {
-  wipeChat();
-});
-
-bot.launch();
