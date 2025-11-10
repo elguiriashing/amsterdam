@@ -7,7 +7,7 @@ import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import fetch from 'node-fetch';
-import startTelegramBot from "./services/telegramwiper.js";
+import { startTelegramBot } from "./services/telegramwiper.js";
 
  // ✅ Launch the bot on server start
 
