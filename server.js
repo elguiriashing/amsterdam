@@ -55,7 +55,8 @@ export async function sendTelegramNotification(text) {
       } catch (err) {
         console.error(`❌ Failed to delete Telegram message ${messageId}:`, err.message);
       }
-    }, 20 * 1000); // 48h
+    }, 48 * 60 * 60 * 1000); // 48h
+
 
     return true;
   } catch (err) {
