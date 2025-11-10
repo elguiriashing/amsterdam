@@ -7,7 +7,10 @@ import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import fetch from 'node-fetch';
-import "./services/telegramwiper.js"; // now can access process.env
+import startTelegramBot from "./services/telegramwiper.js";
+
+ // ✅ Launch the bot on server start
+
 
 
 
@@ -41,7 +44,6 @@ async function sendTelegramNotification(message) {
   }
 }
 
-dotenv.config();
 
 const app = express();
 app.use(cors());
@@ -69,6 +71,9 @@ async function connectDB() {
   }
 }
 connectDB();
+
+// --- Start Telegram Bot ---
+startTelegramBot(); // 🟢 Launch bot on server start with test startup message
 
 // --- ROUTES ---
 
