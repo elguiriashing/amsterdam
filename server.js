@@ -1,11 +1,14 @@
+import dotenv from "dotenv";
+dotenv.config(); // load env variables first
+
 import express from "express";
 import cors from "cors";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
-import dotenv from "dotenv";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import fetch from 'node-fetch'; // Import node-fetch
-import "./services/telegramwiper.js";
+import fetch from 'node-fetch';
+import "./services/telegramWiper.js"; // now can access process.env
+
 
 
 // --- Environment Variables (loaded from Railway) ---
