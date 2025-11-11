@@ -11,6 +11,9 @@ let nextUpdateOffset = 0; // next offset for getUpdates
 let pollingTimeout; // timeout handle for the polling loop
 let pollingActive = false;
 let isWiping = false;
+let botStartTime = Date.now(); // track when bot started
+let currentCronJob = null; // store the active cron job for dynamic rescheduling
+let autoWipeSchedule = { hours: 48, time: "03:00" }; // default: every 48h at 3am
 
 // In-memory store of recent message IDs per chat (so we can delete them later)
 const trackedMessages = new Map(); // chatId -> Array of message IDs
@@ -173,11 +176,71 @@ export async function handleWipeCommand() {
   await wipeMessages();
 }
 
-// Daily auto-wipe at 3am
-cron.schedule("0 3 * * *", async () => {
-  console.log("🧹 Running daily wipe at 3am...");
-  await wipeMessages();
-});
+// Helper to send a temporary message that self-destructs
+async function sendTempMessage(chatId, text, deleteAfterMs = 10000) {
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: "HTML",
+      }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const messageId = data.result.message_id;
+      trackMessage(chatId, messageId);
+      setTimeout(() => deleteMessage(chatId, messageId), deleteAfterMs);
+      return messageId;
+    }
+  } catch (err) {
+    console.error("❌ Failed to send temp message:", err.message);
+  }
+  return null;
+}
+
+// Function to update auto-wipe schedule
+function updateAutoWipeSchedule(hours, time) {
+  // Stop current cron job if it exists
+  if (currentCronJob) {
+    currentCronJob.stop();
+    currentCronJob = null;
+  }
+
+  autoWipeSchedule = { hours, time };
+
+  // Parse time (format: "HH:MM" in 24hr)
+  const [hour, minute] = time.split(":").map(Number);
+  
+  // Create cron expression based on hours
+  let cronExpression;
+  if (hours === 24) {
+    // Daily at specified time
+    cronExpression = `${minute} ${hour} * * *`;
+  } else if (hours === 48) {
+    // Every 2 days at specified time (run on even days)
+    cronExpression = `${minute} ${hour} */2 * *`;
+  } else if (hours === 72) {
+    // Every 3 days at specified time
+    cronExpression = `${minute} ${hour} */3 * *`;
+  } else {
+    // For other intervals, use hourly-based cron (less precise but workable)
+    const hourInterval = Math.floor(hours);
+    cronExpression = `${minute} */${hourInterval} * * *`;
+  }
+
+  currentCronJob = cron.schedule(cronExpression, async () => {
+    console.log(`🧹 Running auto-wipe (every ${hours}h at ${time})...`);
+    await wipeMessages();
+  });
+
+  console.log(`✅ Auto-wipe scheduled: every ${hours}h at ${time} (cron: ${cronExpression})`);
+}
+
+// Initialize default auto-wipe schedule
+updateAutoWipeSchedule(48, "03:00");
 
 // Listen for new Telegram messages to trigger /wipe and /password
 async function pollTelegram() {
@@ -200,11 +263,14 @@ async function pollTelegram() {
       }
 
       const text = msg.text?.trim();
+      
+      // /wipe command
       if (text === "/wipe@Amsterdamnbot") {
         await wipeMessages();
         continue;
       }
 
+      // /password command
       if (text === "/password@Amsterdamnbot") {
         const userChatId = msg.from.id;
         const passwordMessage = `The Admin Dashboard Password is: <code>${ADMIN_PASS}</code>\n\n<i>This message will self-destruct in 60s 💣</i>`;
@@ -212,8 +278,105 @@ async function pollTelegram() {
         if (message_id) {
           setTimeout(() => deleteMessage(userChatId, message_id), 60 * 1000);
         }
-        // Delete the /password command message from the group after 5 seconds
         setTimeout(() => deleteMessage(chatId, msg.message_id), 2 * 1000);
+        continue;
+      }
+
+      // /status command
+      if (text === "/status@Amsterdamnbot") {
+        const uptime = Date.now() - botStartTime;
+        const days = Math.floor(uptime / (1000 * 60 * 60 * 24));
+        const hours = Math.floor((uptime % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        const minutes = Math.floor((uptime % (1000 * 60 * 60)) / (1000 * 60));
+        
+        const trackedCount = trackedMessages.get(String(TELEGRAM_CHAT_ID))?.length || 0;
+        
+        const statusMsg = `
+🤖 <b>Bot Status</b>
+
+⏱ <b>Uptime:</b> ${days}d ${hours}h ${minutes}m
+📊 <b>Tracked Messages:</b> ${trackedCount}
+🧹 <b>Auto-Wipe:</b> Every ${autoWipeSchedule.hours}h at ${autoWipeSchedule.time}
+✅ <b>Status:</b> Online & Active
+        `.trim();
+        
+        await sendTempMessage(chatId, statusMsg, 15000);
+        setTimeout(() => deleteMessage(chatId, msg.message_id), 2 * 1000);
+        continue;
+      }
+
+      // /help command
+      if (text === "/help@Amsterdamnbot") {
+        const helpMsg = `
+🤖 <b>Bot Commands</b>
+
+🔑 <b>/password</b> - Get admin password (DM)
+🧹 <b>/wipe</b> - Wipe all messages (except pinned)
+📊 <b>/status</b> - Bot status & stats
+🌐 <b>/dashboard</b> - Admin panel link
+🌍 <b>/website</b> - Main website link
+⏰ <b>/setautowipe [hours] [time]</b> - Set auto-wipe schedule
+   Example: <code>/setautowipe 24 14:30</code>
+
+💡 All commands auto-delete after a few seconds.
+        `.trim();
+        
+        await sendTempMessage(chatId, helpMsg, 20000);
+        setTimeout(() => deleteMessage(chatId, msg.message_id), 2 * 1000);
+        continue;
+      }
+
+      // /dashboard command
+      if (text === "/dashboard@Amsterdamnbot") {
+        const dashboardMsg = `
+🛠 <b>Admin Dashboard</b>
+
+Click here to access the control panel:
+👉 https://www.socialclubamsterdam.com/admin
+
+Use <b>/password</b> to get the login credentials.
+        `.trim();
+        
+        await sendTempMessage(chatId, dashboardMsg, 15000);
+        setTimeout(() => deleteMessage(chatId, msg.message_id), 2 * 1000);
+        continue;
+      }
+
+      // /website command
+      if (text === "/website@Amsterdamnbot") {
+        const websiteMsg = `
+🌍 <b>Social Club Amsterdam</b>
+
+Main website:
+👉 https://www.socialclubamsterdam.com
+
+Check out our live menu, events, and more!
+        `.trim();
+        
+        await sendTempMessage(chatId, websiteMsg, 15000);
+        setTimeout(() => deleteMessage(chatId, msg.message_id), 2 * 1000);
+        continue;
+      }
+
+      // /setautowipe command
+      if (text?.startsWith("/setautowipe@Amsterdamnbot")) {
+        const parts = text.split(" ");
+        if (parts.length === 3) {
+          const hours = parseInt(parts[1]);
+          const time = parts[2];
+          
+          // Validate hours (1-168, which is 1 hour to 1 week)
+          if (hours >= 1 && hours <= 168 && /^\d{2}:\d{2}$/.test(time)) {
+            updateAutoWipeSchedule(hours, time);
+            await sendTempMessage(chatId, `✅ Auto-wipe updated: Every ${hours}h at ${time}`, 10000);
+          } else {
+            await sendTempMessage(chatId, `❌ Invalid format. Use: <code>/setautowipe [hours] [HH:MM]</code>\nExample: <code>/setautowipe 24 14:30</code>`, 15000);
+          }
+        } else {
+          await sendTempMessage(chatId, `❌ Invalid format. Use: <code>/setautowipe [hours] [HH:MM]</code>\nExample: <code>/setautowipe 24 14:30</code>`, 15000);
+        }
+        setTimeout(() => deleteMessage(chatId, msg.message_id), 2 * 1000);
+        continue;
       }
     }
   } catch (err) {
