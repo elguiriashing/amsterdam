@@ -308,17 +308,17 @@ async function pollTelegram() {
       // /help command
       if (text === "/help@Amsterdamnbot") {
         const helpMsg = `
-🤖 <b>Bot Commands</b>
+🤖 <b>Alex's Bot Commands</b> 🤖
 
-🔑 <b>/password</b> - Get admin password (DM)
-🧹 <b>/wipe</b> - Wipe all messages (except pinned)
-📊 <b>/status</b> - Bot status & stats
-🌐 <b>/dashboard</b> - Admin panel link
-🌍 <b>/website</b> - Main website link
-⏰ <b>/setautowipe [hours] [time]</b> - Set auto-wipe schedule
+🔑 <b>/password@Amsterdamnbot</b> - Get admin password (DM) 🔑
+🧹 <b>/wipe@Amsterdamnbot</b> - Wipe all messages (except pinned) 🧹
+📊 <b>/status@Amsterdamnbot</b> - Bot status & stats 📊
+🌐 <b>/dashboard@Amsterdamnbot </b> - Admin panel link 🌐
+🌍 <b>/website@Amsterdamnbot</b> - Main website link 🌍
+⏰ <b>/setautowipe@Amsterdamnbot [hours] [time]</b> - Set auto-wipe schedule ⏰
    Example: <code>/setautowipe 24 14:30</code>
 
-💡 All commands auto-delete after a few seconds.
+💡 All commands auto-delete after a few seconds. 💡
         `.trim();
         
         await sendTempMessage(chatId, helpMsg, 20000);
@@ -334,7 +334,7 @@ async function pollTelegram() {
 Click here to access the control panel:
 👉 https://www.socialclubamsterdam.com/admin
 
-Use <b>/password</b> to get the login credentials.
+Use <b>/password@Amsterdamnbot</b> to get the login credentials.
         `.trim();
         
         await sendTempMessage(chatId, dashboardMsg, 15000);
