@@ -13,7 +13,7 @@ let pollingTimeout; // To store the timeout ID for pollTelegram
 // Function to send a private message to a specific chat ID
 async function sendPrivateMessage(chat_id, text) {
   try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -22,9 +22,13 @@ async function sendPrivateMessage(chat_id, text) {
         parse_mode: "HTML",
       }),
     });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.description);
     console.log(`✅ Sent private message to ${chat_id}`);
+    return data.result.message_id;
   } catch (err) {
     console.error(`❌ Failed to send private message to ${chat_id}:`, err.message);
+    return null;
   }
 }
 
@@ -41,12 +45,12 @@ async function getPinnedMessageId() {
 }
 
 // Delete a single message
-async function deleteMessage(message_id) {
+async function deleteMessage(chatId, message_id) {
   try {
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, message_id }),
+      body: JSON.stringify({ chat_id: chatId, message_id }),
     });
   } catch (err) {
     console.error("❌ Failed to delete message:", message_id, err.message);
@@ -81,9 +85,9 @@ export async function wipeMessages() {
   clearTimeout(pollingTimeout); // Stop regular polling during wipe
 
   const pinnedId = await getPinnedMessageId();
-  let currentOffset = null; // Start without an offset to get all unconfirmed
+  let currentOffset = lastUpdateId + 1; // Start from the last known update ID to avoid re-processing known messages
   let hasMore = true;
-  let highestUpdateIdDuringWipe = lastUpdateId; // Track highest update_id for post-wipe `lastUpdateId`
+  let highestUpdateIdProcessed = lastUpdateId; // Track highest update_id for post-wipe `lastUpdateId`
 
   while (hasMore) {
     const updates = await getUpdates(currentOffset, 100); // Fetch updates
@@ -94,12 +98,12 @@ export async function wipeMessages() {
       if (!msg || msg.chat.id.toString() !== TELEGRAM_CHAT_ID.toString()) continue;
 
       if (msg.message_id !== pinnedId) {
-        await deleteMessage(msg.message_id);
+        await deleteMessage(TELEGRAM_CHAT_ID, msg.message_id);
       }
       
-      // Update highestUpdateId for the global lastUpdateId after wipe
-      if (update.update_id + 1 > highestUpdateIdDuringWipe) {
-          highestUpdateIdDuringWipe = update.update_id + 1;
+      // Update highestUpdateIdProcessed to the latest update_id encountered
+      if (update.update_id >= highestUpdateIdProcessed) {
+          highestUpdateIdProcessed = update.update_id + 1;
       }
     }
     // Set the offset for the next batch to the update_id + 1 of the last message in the current batch
@@ -112,7 +116,7 @@ export async function wipeMessages() {
 
   // After wipe, set the global lastUpdateId to the highest update_id processed by wipeMessages
   // This ensures pollTelegram starts from where wipeMessages left off
-  lastUpdateId = highestUpdateIdDuringWipe;
+  lastUpdateId = highestUpdateIdProcessed;
 
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
@@ -155,7 +159,11 @@ async function pollTelegram() {
       // Send admin password privately on /password command
       if (msg.text?.trim() === "/password") {
         const userChatId = msg.from.id;
-        await sendPrivateMessage(userChatId, `The Admin Dashboard Password is: <code>${ADMIN_PASS}</code>`);
+        const passwordMessage = `The Admin Dashboard Password is: <code>${ADMIN_PASS}</code>\n\n<i>This message will self-destruct in 60s 💣</i>`;
+        const message_id = await sendPrivateMessage(userChatId, passwordMessage);
+        if (message_id) {
+          setTimeout(() => deleteMessage(userChatId, message_id), 60 * 1000); // 60 seconds
+        }
       }
 
       // Only update lastUpdateId if the current update_id is higher
