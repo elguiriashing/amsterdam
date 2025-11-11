@@ -10,6 +10,29 @@ const ADMIN_PASS = process.env.ADMIN_PASS; // Access ADMIN_PASS
 let lastUpdateId = 0; // track the last update to avoid double-processing
 let pollingTimeout; // To store the timeout ID for pollTelegram
 
+// In-memory store of recent message IDs per chat (so we can delete them later)
+const trackedMessages = new Map(); // chatId -> Array of message IDs
+const MAX_TRACKED_PER_CHAT = 500; // safety cap
+
+function trackMessage(chatId, messageId) {
+  if (!messageId) return;
+  if (!trackedMessages.has(chatId)) {
+    trackedMessages.set(chatId, []);
+  }
+  const arr = trackedMessages.get(chatId);
+  arr.push(messageId);
+  if (arr.length > MAX_TRACKED_PER_CHAT) {
+    arr.splice(0, arr.length - MAX_TRACKED_PER_CHAT);
+  }
+}
+
+function removeTrackedMessage(chatId, messageId) {
+  const arr = trackedMessages.get(chatId);
+  if (!arr) return;
+  const idx = arr.indexOf(messageId);
+  if (idx !== -1) arr.splice(idx, 1);
+}
+
 // Function to send a private message to a specific chat ID
 async function sendPrivateMessage(chat_id, text) {
   try {
@@ -52,6 +75,7 @@ async function deleteMessage(chatId, message_id) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, message_id }),
     });
+    removeTrackedMessage(chatId, message_id);
   } catch (err) {
     console.error("❌ Failed to delete message:", message_id, err.message);
   }
@@ -85,38 +109,20 @@ export async function wipeMessages() {
   clearTimeout(pollingTimeout); // Stop regular polling during wipe
 
   const pinnedId = await getPinnedMessageId();
-  let currentOffset = lastUpdateId + 1; // Start from the last known update ID to avoid re-processing known messages
-  let hasMore = true;
-  let highestUpdateIdProcessed = lastUpdateId; // Track highest update_id for post-wipe `lastUpdateId`
+  const messagesForChat = trackedMessages.get(TELEGRAM_CHAT_ID) ? [...trackedMessages.get(TELEGRAM_CHAT_ID)] : [];
 
-  while (hasMore) {
-    const updates = await getUpdates(currentOffset, 100); // Fetch updates
-    if (!updates.length) break;
-
-    for (const update of updates) {
-      const msg = update.message || update.channel_post;
-      if (!msg || msg.chat.id.toString() !== TELEGRAM_CHAT_ID.toString()) continue;
-
-      if (msg.message_id !== pinnedId) {
-        await deleteMessage(TELEGRAM_CHAT_ID, msg.message_id);
-      }
-      
-      // Update highestUpdateIdProcessed to the latest update_id encountered
-      if (update.update_id >= highestUpdateIdProcessed) {
-          highestUpdateIdProcessed = update.update_id + 1;
-      }
-    }
-    // Set the offset for the next batch to the update_id + 1 of the last message in the current batch
-    if (updates.length > 0) {
-      currentOffset = updates[updates.length - 1].update_id + 1;
-    }
-
-    if (updates.length < 100) hasMore = false; // No more updates if less than limit
+  if (messagesForChat.length === 0) {
+    console.log("No tracked messages to wipe.");
   }
 
-  // After wipe, set the global lastUpdateId to the highest update_id processed by wipeMessages
-  // This ensures pollTelegram starts from where wipeMessages left off
-  lastUpdateId = highestUpdateIdProcessed;
+  for (const messageId of messagesForChat) {
+    if (messageId === pinnedId) continue; // never delete pinned
+    await deleteMessage(TELEGRAM_CHAT_ID, messageId);
+  }
+
+  // After wiping, reset the tracked messages for the chat (keep pinned if tracked)
+  const remaining = pinnedId ? [pinnedId] : [];
+  trackedMessages.set(TELEGRAM_CHAT_ID, remaining);
 
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
@@ -127,7 +133,7 @@ export async function wipeMessages() {
     }),
   });
 
-  console.log(`✅ Wipe complete! lastUpdateId set to: ${lastUpdateId}. Restarting polling.`);
+  console.log("✅ Wipe complete! Restarting polling.");
   pollTelegram(); // Restart regular polling
 }
 
@@ -150,6 +156,13 @@ async function pollTelegram() {
     for (const update of updates) {
       const msg = update.message || update.channel_post;
       if (!msg || msg.chat.id.toString() !== TELEGRAM_CHAT_ID.toString()) continue;
+
+      trackMessage(msg.chat.id, msg.message_id);
+
+      // If this update contains service information about pinned/unpinned messages, track those message IDs too
+      if (msg.pinned_message?.message_id) {
+        trackMessage(msg.chat.id, msg.pinned_message.message_id);
+      }
 
       // Trigger wipe on /wipe command
       if (msg.text?.trim() === "/wipe") {
