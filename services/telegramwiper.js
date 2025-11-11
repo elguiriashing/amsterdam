@@ -200,12 +200,12 @@ async function pollTelegram() {
       }
 
       const text = msg.text?.trim();
-      if (text === "/wipe") {
+      if (text === "/wipe@Amsterdamnbot") {
         await wipeMessages();
         continue;
       }
 
-      if (text === "/password") {
+      if (text === "/password@Amsterdamnbot") {
         const userChatId = msg.from.id;
         const passwordMessage = `The Admin Dashboard Password is: <code>${ADMIN_PASS}</code>\n\n<i>This message will self-destruct in 60s 💣</i>`;
         const message_id = await sendPrivateMessage(userChatId, passwordMessage);
@@ -213,7 +213,7 @@ async function pollTelegram() {
           setTimeout(() => deleteMessage(userChatId, message_id), 60 * 1000);
         }
         // Delete the /password command message from the group after 5 seconds
-        setTimeout(() => deleteMessage(chatId, msg.message_id), 5 * 1000);
+        setTimeout(() => deleteMessage(chatId, msg.message_id), 2 * 1000);
       }
     }
   } catch (err) {
