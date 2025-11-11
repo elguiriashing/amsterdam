@@ -212,6 +212,8 @@ async function pollTelegram() {
         if (message_id) {
           setTimeout(() => deleteMessage(userChatId, message_id), 60 * 1000);
         }
+        // Delete the /password command message from the group after 5 seconds
+        setTimeout(() => deleteMessage(chatId, msg.message_id), 5 * 1000);
       }
     }
   } catch (err) {
