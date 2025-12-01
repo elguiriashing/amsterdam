@@ -144,7 +144,15 @@ app.post("/api/login", async (req, res) => {
   try {
     if (await bcrypt.compare(password, member.password)) {
       const token = generateToken(member);
-      res.json({ user: { id: member._id, name: member.name, email: member.email }, token });
+      res.json({ 
+        user: { 
+          id: member._id, 
+          name: member.name, 
+          email: member.email,
+          balance: member.balance || 0
+        }, 
+        token 
+      });
     } else {
       res.status(403).send("Not Allowed");
     }
@@ -187,7 +195,16 @@ app.post("/api/members", authenticateToken, async (req, res) => {
     const membershipEndDate = new Date();
     membershipEndDate.setFullYear(membershipEndDate.getFullYear() + 1);
 
-    const result = await db.collection("members").insertOne({ name, email, password: hashedPassword, createdAt: new Date(), membershipEndDate });
+    const balance = parseFloat(req.body.balance) || 0;
+
+    const result = await db.collection("members").insertOne({ 
+      name, 
+      email, 
+      password: hashedPassword, 
+      createdAt: new Date(), 
+      membershipEndDate,
+      balance: balance
+    });
     res.status(201).json({ success: true, message: "Member added.", memberId: result.insertedId });
   } catch (err) {
     res.status(500).json({ error: "Failed to add member", details: err });
@@ -215,21 +232,63 @@ app.put("/api/members/:id", authenticateToken, async (req, res) => {
   }
   try {
     const id = req.params.id;
-    const { name, email, membershipEndDate } = req.body;
+    const { name, email, membershipEndDate, balance } = req.body;
 
     if (!name || !email || !membershipEndDate) {
       return res.status(400).json({ error: "Missing name, email, or membership end date" });
     }
 
     // Note: Password changes should ideally be handled via a separate, secure flow.
-    // Here, we're only allowing name, email, and membershipEndDate to be updated.
-    await db.collection("members").updateOne(
+    // Here, we're allowing name, email, membershipEndDate, and balance to be updated.
+    const updateData = { 
+      name, 
+      email, 
+      membershipEndDate: new Date(membershipEndDate), 
+      updatedAt: new Date() 
+    };
+    
+    // Always update balance if provided (even if 0)
+    if (balance !== undefined && balance !== null) {
+      updateData.balance = parseFloat(balance) || 0;
+    }
+    
+    const result = await db.collection("members").updateOne(
       { _id: new ObjectId(id) },
-      { $set: { name, email, membershipEndDate: new Date(membershipEndDate), updatedAt: new Date() } }
+      { $set: updateData }
     );
-    res.json({ success: true, message: "Member updated." });
+    
+    if (result.modifiedCount > 0 || result.matchedCount > 0) {
+      res.json({ success: true, message: "Member updated." });
+    } else {
+      res.status(404).json({ success: false, message: "Member not found or no changes made." });
+    }
   } catch (err) {
     res.status(500).json({ error: "Failed to update member", details: err });
+  }
+});
+
+// 👤 Get member profile (for logged-in members)
+app.get("/api/member/profile", authenticateToken, async (req, res) => {
+  try {
+    // Only allow members to access their own profile (not admins)
+    if (req.user.id === 'admin') {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    
+    const member = await db.collection("members").findOne({ _id: new ObjectId(req.user.id) });
+    if (!member) {
+      return res.status(404).json({ message: 'Member not found' });
+    }
+    
+    res.json({
+      id: member._id,
+      name: member.name,
+      email: member.email,
+      balance: member.balance || 0,
+      membershipEndDate: member.membershipEndDate
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch member profile", details: err });
   }
 });
 
