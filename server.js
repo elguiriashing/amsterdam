@@ -764,8 +764,16 @@ app.post("/api/passkeys/register-options", authenticateToken, async (req, res) =
     });
 
     // Generate a unique user ID for this registration
-    const uniqueUserId = `staff-${staffName}-${Date.now()}`;
-    const userIdBytes = new TextEncoder().encode(uniqueUserId);
+    // User ID must be max 64 bytes per WebAuthn spec
+    // Use a shorter format to ensure compatibility with mobile browsers
+    const uniqueUserId = `${staffName}-${Date.now()}`;
+    let userIdBytes = new TextEncoder().encode(uniqueUserId);
+    
+    // Truncate if too long (shouldn't happen, but safety check)
+    if (userIdBytes.length > 64) {
+      console.warn(`⚠️ [WEBAUTHN] User ID too long (${userIdBytes.length} bytes), truncating`);
+      userIdBytes = userIdBytes.slice(0, 64);
+    }
 
     console.log(`🔐 [WEBAUTHN] Generating options for ${staffName} with rpID: ${WEBAUTHN_CONFIG.rpID}`);
     
