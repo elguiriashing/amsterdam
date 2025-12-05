@@ -10,7 +10,13 @@ import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import fetch from 'node-fetch';
+import crypto from 'crypto';
 import { startTelegramBot } from "./services/telegramwiper.js";
+
+// Fix for @simplewebauthn in Node.js - set global crypto
+if (!globalThis.crypto) {
+  globalThis.crypto = crypto.webcrypto;
+}
 
 // WebAuthn imports
 import {
@@ -22,6 +28,7 @@ import {
 
 console.log("🔧 [INIT] Loading server modules...");
 console.log("🔐 [WEBAUTHN] WebAuthn module loaded");
+console.log("🔐 [WEBAUTHN] Crypto API available:", !!globalThis.crypto);
 
 // --- Environment Variables (loaded from Railway) ---
 const ADMIN_PASS = process.env.ADMIN_PASS;
