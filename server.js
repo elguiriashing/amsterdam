@@ -836,8 +836,9 @@ app.post("/api/passkeys/register", authenticateToken, async (req, res) => {
     }
     
     console.log(`🔐 [WEBAUTHN] Verifying registration for ${staffName} (${deviceName})`);
-    console.log(`🔐 [WEBAUTHN] Credential data:`, {
-      id: credential.id ? 'present' : 'missing',
+    console.log(`🔐 [WEBAUTHN] Credential data from browser:`, {
+      id: credential.id ? credential.id.substring(0, 30) + '...' : 'missing',
+      rawId: credential.rawId ? credential.rawId.substring(0, 30) + '...' : 'missing',
       type: credential.type,
       hasClientDataJSON: !!credential.response.clientDataJSON,
       hasAttestationObject: !!credential.response.attestationObject,
@@ -876,10 +877,22 @@ app.post("/api/passkeys/register", authenticateToken, async (req, res) => {
     }
 
     const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+    
+    // Store both the credentialID from verification (raw bytes) and the browser's credential.id
+    // The browser's credential.id might be different from credentialID, so we store both
+    const storedCredentialId = Buffer.from(credentialID).toString('base64url');
+    const browserCredentialId = credential.id; // This is what the browser will send back during login
+    
+    console.log(`🔐 [WEBAUTHN] Storing credential:`, {
+      storedCredentialId: storedCredentialId.substring(0, 30) + '...',
+      browserCredentialId: browserCredentialId?.substring(0, 30) + '...',
+      match: storedCredentialId === browserCredentialId ? 'YES' : 'NO (will need to match both)'
+    });
 
-    // Save to database
+    // Save to database - store the credentialID from verification (this is the canonical ID)
     await db.collection("passkeys").insertOne({
-      credentialId: Buffer.from(credentialID).toString('base64url'),
+      credentialId: storedCredentialId, // This is what we'll match against
+      browserCredentialId: browserCredentialId, // Also store browser's ID for easier matching
       credentialPublicKey: Buffer.from(credentialPublicKey).toString('base64url'),
       counter,
       staffName,
@@ -999,20 +1012,36 @@ app.post("/api/passkeys/login", async (req, res) => {
     const allPasskeys = await db.collection("passkeys").find().toArray();
     console.log(`🔐 [WEBAUTHN] Checking against ${allPasskeys.length} stored passkeys`);
     
+    // Log all stored credential IDs for debugging
+    console.log(`🔐 [WEBAUTHN] Stored credential IDs:`, allPasskeys.map(p => ({
+      storedId: normalizeCredentialString(p.credentialId)?.substring(0, 30) + '...',
+      browserId: p.browserCredentialId?.substring(0, 30) + '...',
+      staffName: p.staffName,
+      deviceName: p.deviceName
+    })));
+    
     let passkey = null;
     
     // Try multiple matching strategies
     for (const p of allPasskeys) {
       const storedId = normalizeCredentialString(p.credentialId);
+      const storedBrowserId = p.browserCredentialId ? normalizeCredentialString(p.browserCredentialId) : null;
       
-      // Strategy 1: Direct string match
+      // Strategy 1: Match against stored credentialId (from verification)
       if (storedId === credentialIdFromBrowser || storedId === credentialRawIdBase64) {
         passkey = p;
-        console.log(`✅ [WEBAUTHN] Matched by direct string comparison`);
+        console.log(`✅ [WEBAUTHN] Matched by stored credentialId`);
         break;
       }
       
-      // Strategy 2: Compare base64url decoded bytes
+      // Strategy 2: Match against browserCredentialId (from registration request)
+      if (storedBrowserId && (storedBrowserId === credentialIdFromBrowser || storedBrowserId === credentialRawIdBase64)) {
+        passkey = p;
+        console.log(`✅ [WEBAUTHN] Matched by browserCredentialId`);
+        break;
+      }
+      
+      // Strategy 3: Compare base64url decoded bytes
       try {
         const storedBytes = Buffer.from(storedId, 'base64url');
         const browserBytes = Buffer.from(credentialIdFromBrowser || credentialRawIdBase64, 'base64url');
@@ -1026,18 +1055,32 @@ app.post("/api/passkeys/login", async (req, res) => {
       }
     }
     
-    // If still not found, try database query as fallback
+    // If still not found, try database queries as fallback
     if (!passkey) {
       passkey = await db.collection("passkeys").findOne({ credentialId: credentialIdFromBrowser });
       if (passkey) {
-        console.log(`✅ [WEBAUTHN] Matched by database query (credential.id)`);
+        console.log(`✅ [WEBAUTHN] Matched by database query (credentialId = credential.id)`);
+      }
+    }
+    
+    if (!passkey) {
+      passkey = await db.collection("passkeys").findOne({ browserCredentialId: credentialIdFromBrowser });
+      if (passkey) {
+        console.log(`✅ [WEBAUTHN] Matched by database query (browserCredentialId = credential.id)`);
       }
     }
     
     if (!passkey && credentialRawIdBase64) {
       passkey = await db.collection("passkeys").findOne({ credentialId: credentialRawIdBase64 });
       if (passkey) {
-        console.log(`✅ [WEBAUTHN] Matched by database query (credential.rawId)`);
+        console.log(`✅ [WEBAUTHN] Matched by database query (credentialId = credential.rawId)`);
+      }
+    }
+    
+    if (!passkey && credentialRawIdBase64) {
+      passkey = await db.collection("passkeys").findOne({ browserCredentialId: credentialRawIdBase64 });
+      if (passkey) {
+        console.log(`✅ [WEBAUTHN] Matched by database query (browserCredentialId = credential.rawId)`);
       }
     }
     
