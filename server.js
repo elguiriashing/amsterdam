@@ -737,10 +737,13 @@ app.post("/api/passkeys/register-options", authenticateToken, async (req, res) =
 
     // Get existing credentials for this user to prevent duplicates
     const existingPasskeys = await db.collection("passkeys").find().toArray();
-    const excludeCredentials = existingPasskeys.map(p => ({
-      id: Buffer.from(p.credentialId, 'base64url'),
-      type: 'public-key',
-    }));
+    const excludeCredentials = existingPasskeys.map(p => {
+      const idBuffer = Buffer.from(p.credentialId, 'base64url');
+      return {
+        id: new Uint8Array(idBuffer),
+        type: 'public-key',
+      };
+    });
 
     // Generate a unique user ID for this registration
     const uniqueUserId = `staff-${staffName}-${Date.now()}`;
@@ -867,17 +870,27 @@ app.delete("/api/passkeys/:id", authenticateToken, async (req, res) => {
 // Start biometric login (no auth required - this IS the login)
 app.post("/api/passkeys/login-options", async (req, res) => {
   try {
+    console.log(`🔐 [WEBAUTHN] Login options requested`);
+    
     const passkeys = await db.collection("passkeys").find().toArray();
+    console.log(`🔐 [WEBAUTHN] Found ${passkeys.length} passkeys in database`);
     
     if (passkeys.length === 0) {
       return res.status(400).json({ error: "No passkeys registered. Login with password first." });
     }
 
-    const allowCredentials = passkeys.map(p => ({
-      id: Buffer.from(p.credentialId, 'base64url'),
-      type: 'public-key',
-    }));
+    const allowCredentials = passkeys.map(p => {
+      console.log(`🔐 [WEBAUTHN] Processing credential: ${p.credentialId?.substring(0, 20)}...`);
+      // Convert base64url to Uint8Array
+      const idBuffer = Buffer.from(p.credentialId, 'base64url');
+      return {
+        id: new Uint8Array(idBuffer),
+        type: 'public-key',
+      };
+    });
 
+    console.log(`🔐 [WEBAUTHN] Generating auth options with rpID: ${WEBAUTHN_CONFIG.rpID}`);
+    
     const options = await generateAuthenticationOptions({
       rpID: WEBAUTHN_CONFIG.rpID,
       allowCredentials,
@@ -888,11 +901,12 @@ app.post("/api/passkeys/login-options", async (req, res) => {
     const challengeId = `auth-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     storeChallenge(challengeId, options.challenge);
 
-    console.log(`🔐 [WEBAUTHN] Authentication options generated`);
+    console.log(`✅ [WEBAUTHN] Authentication options generated successfully`);
     res.json({ options, challengeId });
   } catch (err) {
-    console.error("❌ [WEBAUTHN] Error generating auth options:", err);
-    res.status(500).json({ error: "Failed to generate authentication options" });
+    console.error("❌ [WEBAUTHN] Error generating auth options:", err.message);
+    console.error("❌ [WEBAUTHN] Full error:", err);
+    res.status(500).json({ error: "Failed to generate authentication options", details: err.message });
   }
 });
 
@@ -926,8 +940,8 @@ app.post("/api/passkeys/login", async (req, res) => {
       expectedOrigin: expectedOrigins,
       expectedRPID: WEBAUTHN_CONFIG.rpID,
       authenticator: {
-        credentialID: Buffer.from(passkey.credentialId, 'base64url'),
-        credentialPublicKey: Buffer.from(passkey.credentialPublicKey, 'base64url'),
+        credentialID: new Uint8Array(Buffer.from(passkey.credentialId, 'base64url')),
+        credentialPublicKey: new Uint8Array(Buffer.from(passkey.credentialPublicKey, 'base64url')),
         counter: passkey.counter,
       },
     });
