@@ -780,7 +780,18 @@ app.post("/api/passkeys/register-options", authenticateToken, async (req, res) =
       authenticatorSelection: {
         residentKey: 'preferred',
         userVerification: 'preferred',
+        // Don't restrict authenticatorAttachment - let browser choose (platform or cross-platform)
       },
+      // Add timeout for mobile devices (30 seconds)
+      timeout: 30000,
+    });
+    
+    console.log(`🔐 [WEBAUTHN] Registration options generated:`, {
+      challenge: options.challenge ? 'present' : 'missing',
+      rp: options.rp,
+      user: options.user ? { name: options.user.name, displayName: options.user.displayName } : 'missing',
+      excludeCredentials: excludeCredentials.length,
+      authenticatorSelection: options.authenticatorSelection
     });
 
     // Store challenge temporarily
@@ -810,8 +821,23 @@ app.post("/api/passkeys/register", authenticateToken, async (req, res) => {
   try {
     const { challengeId, credential, staffName, deviceName } = req.body;
     
+    if (!credential || !credential.response) {
+      console.error(`❌ [WEBAUTHN] Invalid credential data received for ${staffName}`);
+      return res.status(400).json({ error: "Invalid credential data received" });
+    }
+    
+    console.log(`🔐 [WEBAUTHN] Verifying registration for ${staffName} (${deviceName})`);
+    console.log(`🔐 [WEBAUTHN] Credential data:`, {
+      id: credential.id ? 'present' : 'missing',
+      type: credential.type,
+      hasClientDataJSON: !!credential.response.clientDataJSON,
+      hasAttestationObject: !!credential.response.attestationObject,
+      transports: credential.response.transports || 'none'
+    });
+    
     const expectedChallenge = getChallenge(challengeId);
     if (!expectedChallenge) {
+      console.warn(`🚫 [WEBAUTHN] Challenge expired or invalid for ${staffName}`);
       return res.status(400).json({ error: "Challenge expired or invalid. Please try again." });
     }
 
@@ -820,6 +846,9 @@ app.post("/api/passkeys/register", authenticateToken, async (req, res) => {
     const expectedOrigins = Array.isArray(WEBAUTHN_CONFIG.origin) 
       ? WEBAUTHN_CONFIG.origin 
       : [WEBAUTHN_CONFIG.origin];
+    
+    console.log(`🔐 [WEBAUTHN] Expected origins:`, expectedOrigins);
+    console.log(`🔐 [WEBAUTHN] Request origin:`, requestOrigin);
 
     const verification = await verifyRegistrationResponse({
       response: credential,
@@ -830,7 +859,11 @@ app.post("/api/passkeys/register", authenticateToken, async (req, res) => {
 
     if (!verification.verified || !verification.registrationInfo) {
       console.warn(`🚫 [WEBAUTHN] Registration verification failed for ${staffName}`);
-      return res.status(400).json({ error: "Verification failed" });
+      console.warn(`🚫 [WEBAUTHN] Verification result:`, {
+        verified: verification.verified,
+        hasRegistrationInfo: !!verification.registrationInfo
+      });
+      return res.status(400).json({ error: "Verification failed. Please try again." });
     }
 
     const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
