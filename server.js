@@ -980,13 +980,44 @@ app.post("/api/passkeys/login", async (req, res) => {
     }
 
     // Find the passkey by credential ID
-    const credentialIdBase64 = credential.id;
-    const passkey = await db.collection("passkeys").findOne({ credentialId: credentialIdBase64 });
+    // The credential.id from browser is base64url string
+    // We need to match it against our stored credentialId (also base64url)
+    const credentialIdFromBrowser = credential.id; // This is already base64url from browser
+    const credentialRawIdBase64 = credential.rawId; // This is also base64url
+    
+    console.log(`🔐 [WEBAUTHN] Looking for credential:`, {
+      id: credentialIdFromBrowser?.substring(0, 20) + '...',
+      rawId: credentialRawIdBase64?.substring(0, 20) + '...'
+    });
+    
+    // Try to find by credential.id first (browser's base64url format)
+    let passkey = await db.collection("passkeys").findOne({ credentialId: credentialIdFromBrowser });
+    
+    // If not found, try with rawId (some browsers use this format)
+    if (!passkey && credentialRawIdBase64) {
+      passkey = await db.collection("passkeys").findOne({ credentialId: credentialRawIdBase64 });
+    }
+    
+    // If still not found, try to find by normalizing and comparing all passkeys
+    if (!passkey) {
+      const allPasskeys = await db.collection("passkeys").find().toArray();
+      for (const p of allPasskeys) {
+        const storedId = normalizeCredentialString(p.credentialId);
+        // Compare normalized IDs
+        if (storedId === credentialIdFromBrowser || storedId === credentialRawIdBase64) {
+          passkey = p;
+          break;
+        }
+      }
+    }
     
     if (!passkey) {
       console.warn(`🚫 [WEBAUTHN] Unknown credential attempted login`);
-      return res.status(400).json({ error: "Passkey not recognized" });
+      console.warn(`🚫 [WEBAUTHN] Credential ID: ${credentialIdFromBrowser?.substring(0, 30)}...`);
+      return res.status(400).json({ error: "Passkey not recognized. Please register this device first." });
     }
+    
+    console.log(`✅ [WEBAUTHN] Found passkey: ${passkey.staffName} (${passkey.deviceName})`);
 
     // Determine expected origin
     const expectedOrigins = Array.isArray(WEBAUTHN_CONFIG.origin) 
