@@ -786,9 +786,10 @@ app.post("/api/passkeys/register-options", authenticateToken, async (req, res) =
       attestationType: 'none',
       excludeCredentials,
       authenticatorSelection: {
-        residentKey: 'preferred',
+        residentKey: 'preferred', // Allow both resident and non-resident keys
         userVerification: 'preferred',
-        // Don't restrict authenticatorAttachment - let browser choose (platform or cross-platform)
+        // Don't restrict authenticatorAttachment - allow both platform and cross-platform
+        // This allows Google Password Manager (cross-platform) to work
       },
       // Add timeout for mobile devices (30 seconds)
       timeout: 30000,
@@ -954,6 +955,8 @@ app.post("/api/passkeys/login-options", async (req, res) => {
       rpID: WEBAUTHN_CONFIG.rpID,
       allowCredentials,
       userVerification: 'preferred',
+      // Don't restrict to platform only - allow both platform and cross-platform passkeys
+      // This allows Google Password Manager passkeys to work
     });
 
     // Store challenge temporarily
@@ -986,35 +989,67 @@ app.post("/api/passkeys/login", async (req, res) => {
     const credentialRawIdBase64 = credential.rawId; // This is also base64url
     
     console.log(`🔐 [WEBAUTHN] Looking for credential:`, {
-      id: credentialIdFromBrowser?.substring(0, 20) + '...',
-      rawId: credentialRawIdBase64?.substring(0, 20) + '...'
+      id: credentialIdFromBrowser?.substring(0, 30) + '...',
+      rawId: credentialRawIdBase64?.substring(0, 30) + '...',
+      idLength: credentialIdFromBrowser?.length,
+      rawIdLength: credentialRawIdBase64?.length
     });
     
-    // Try to find by credential.id first (browser's base64url format)
-    let passkey = await db.collection("passkeys").findOne({ credentialId: credentialIdFromBrowser });
+    // Get all passkeys and try to match
+    const allPasskeys = await db.collection("passkeys").find().toArray();
+    console.log(`🔐 [WEBAUTHN] Checking against ${allPasskeys.length} stored passkeys`);
     
-    // If not found, try with rawId (some browsers use this format)
-    if (!passkey && credentialRawIdBase64) {
-      passkey = await db.collection("passkeys").findOne({ credentialId: credentialRawIdBase64 });
-    }
+    let passkey = null;
     
-    // If still not found, try to find by normalizing and comparing all passkeys
-    if (!passkey) {
-      const allPasskeys = await db.collection("passkeys").find().toArray();
-      for (const p of allPasskeys) {
-        const storedId = normalizeCredentialString(p.credentialId);
-        // Compare normalized IDs
-        if (storedId === credentialIdFromBrowser || storedId === credentialRawIdBase64) {
+    // Try multiple matching strategies
+    for (const p of allPasskeys) {
+      const storedId = normalizeCredentialString(p.credentialId);
+      
+      // Strategy 1: Direct string match
+      if (storedId === credentialIdFromBrowser || storedId === credentialRawIdBase64) {
+        passkey = p;
+        console.log(`✅ [WEBAUTHN] Matched by direct string comparison`);
+        break;
+      }
+      
+      // Strategy 2: Compare base64url decoded bytes
+      try {
+        const storedBytes = Buffer.from(storedId, 'base64url');
+        const browserBytes = Buffer.from(credentialIdFromBrowser || credentialRawIdBase64, 'base64url');
+        if (storedBytes.equals(browserBytes)) {
           passkey = p;
+          console.log(`✅ [WEBAUTHN] Matched by byte comparison`);
           break;
         }
+      } catch (e) {
+        // Continue to next strategy
+      }
+    }
+    
+    // If still not found, try database query as fallback
+    if (!passkey) {
+      passkey = await db.collection("passkeys").findOne({ credentialId: credentialIdFromBrowser });
+      if (passkey) {
+        console.log(`✅ [WEBAUTHN] Matched by database query (credential.id)`);
+      }
+    }
+    
+    if (!passkey && credentialRawIdBase64) {
+      passkey = await db.collection("passkeys").findOne({ credentialId: credentialRawIdBase64 });
+      if (passkey) {
+        console.log(`✅ [WEBAUTHN] Matched by database query (credential.rawId)`);
       }
     }
     
     if (!passkey) {
       console.warn(`🚫 [WEBAUTHN] Unknown credential attempted login`);
-      console.warn(`🚫 [WEBAUTHN] Credential ID: ${credentialIdFromBrowser?.substring(0, 30)}...`);
-      return res.status(400).json({ error: "Passkey not recognized. Please register this device first." });
+      console.warn(`🚫 [WEBAUTHN] Credential ID from browser: ${credentialIdFromBrowser?.substring(0, 50)}...`);
+      console.warn(`🚫 [WEBAUTHN] Stored credential IDs:`, allPasskeys.map(p => ({
+        id: normalizeCredentialString(p.credentialId)?.substring(0, 30) + '...',
+        staffName: p.staffName,
+        deviceName: p.deviceName
+      })));
+      return res.status(400).json({ error: "Passkey not recognized. The passkey may have been created on a different device or account. Please register this device again." });
     }
     
     console.log(`✅ [WEBAUTHN] Found passkey: ${passkey.staffName} (${passkey.deviceName})`);
