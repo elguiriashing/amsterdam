@@ -12,7 +12,16 @@ import jwt from "jsonwebtoken";
 import fetch from 'node-fetch';
 import { startTelegramBot } from "./services/telegramwiper.js";
 
+// WebAuthn imports
+import {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} from '@simplewebauthn/server';
+
 console.log("🔧 [INIT] Loading server modules...");
+console.log("🔐 [WEBAUTHN] WebAuthn module loaded");
 
 // --- Environment Variables (loaded from Railway) ---
 const ADMIN_PASS = process.env.ADMIN_PASS;
@@ -29,6 +38,33 @@ const ALLOWED_ORIGINS = [
   'http://127.0.0.1:5500'
 ];
 console.log("🌐 [CORS] Allowed origins:", ALLOWED_ORIGINS);
+
+// --- WebAuthn Configuration ---
+const WEBAUTHN_CONFIG = {
+  rpName: 'Social Club Amsterdam',
+  rpID: process.env.NODE_ENV === 'production' ? 'www.socialclubamsterdam.com' : 'localhost',
+  origin: process.env.NODE_ENV === 'production' 
+    ? ['https://www.socialclubamsterdam.com', 'https://socialclubamsterdam.com']
+    : ['http://localhost:5500', 'http://127.0.0.1:5500'],
+  maxPasskeys: 10, // Maximum number of passkeys allowed
+};
+console.log("🔐 [WEBAUTHN] Config:", { rpID: WEBAUTHN_CONFIG.rpID, maxPasskeys: WEBAUTHN_CONFIG.maxPasskeys });
+
+// Temporary challenge store (in-memory) - challenges expire after 5 minutes
+const challengeStore = new Map();
+function storeChallenge(id, challenge) {
+  challengeStore.set(id, { challenge, timestamp: Date.now() });
+  // Clean up after 5 minutes
+  setTimeout(() => challengeStore.delete(id), 5 * 60 * 1000);
+}
+function getChallenge(id) {
+  const data = challengeStore.get(id);
+  if (data) {
+    challengeStore.delete(id); // One-time use
+    return data.challenge;
+  }
+  return null;
+}
 
 // --- Telegram Notification Helper ---
 export async function sendTelegramNotification(text) {
@@ -637,6 +673,287 @@ app.delete("/api/events/:id", authenticateToken, async (req, res) => {
 function generateToken(user) {
   return jwt.sign({ id: user._id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: "1h" });
 }
+
+// =============================================================================
+// 🔐 WEBAUTHN / PASSKEY AUTHENTICATION
+// =============================================================================
+
+// Get all registered passkeys (Admin only)
+app.get("/api/passkeys", authenticateToken, async (req, res) => {
+  if (req.user.id !== 'admin') {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+  try {
+    const passkeys = await db.collection("passkeys").find().toArray();
+    // Don't send the full credential data, just metadata
+    const safePasskeys = passkeys.map(p => ({
+      _id: p._id,
+      staffName: p.staffName,
+      deviceName: p.deviceName,
+      registeredAt: p.registeredAt,
+      lastUsed: p.lastUsed
+    }));
+    console.log(`🔐 [WEBAUTHN] Fetched ${safePasskeys.length} passkeys`);
+    res.json({ passkeys: safePasskeys, maxPasskeys: WEBAUTHN_CONFIG.maxPasskeys });
+  } catch (err) {
+    console.error("❌ [WEBAUTHN] Error fetching passkeys:", err);
+    res.status(500).json({ error: "Failed to fetch passkeys" });
+  }
+});
+
+// Start passkey registration (Admin must be logged in)
+app.post("/api/passkeys/register-options", authenticateToken, async (req, res) => {
+  if (req.user.id !== 'admin') {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+  
+  try {
+    const { staffName, deviceName } = req.body;
+    if (!staffName || !deviceName) {
+      return res.status(400).json({ error: "Missing staffName or deviceName" });
+    }
+
+    // Check passkey limit
+    const existingCount = await db.collection("passkeys").countDocuments();
+    if (existingCount >= WEBAUTHN_CONFIG.maxPasskeys) {
+      console.warn(`🚫 [WEBAUTHN] Passkey limit reached (${existingCount}/${WEBAUTHN_CONFIG.maxPasskeys})`);
+      return res.status(400).json({ error: `Maximum ${WEBAUTHN_CONFIG.maxPasskeys} passkeys allowed. Delete one to add more.` });
+    }
+
+    // Get existing credentials for this user to prevent duplicates
+    const existingPasskeys = await db.collection("passkeys").find().toArray();
+    const excludeCredentials = existingPasskeys.map(p => ({
+      id: Buffer.from(p.credentialId, 'base64url'),
+      type: 'public-key',
+    }));
+
+    // Generate a unique user ID for this registration
+    const uniqueUserId = `staff-${staffName}-${Date.now()}`;
+
+    const options = await generateRegistrationOptions({
+      rpName: WEBAUTHN_CONFIG.rpName,
+      rpID: WEBAUTHN_CONFIG.rpID,
+      userID: Buffer.from(uniqueUserId),
+      userName: staffName,
+      userDisplayName: `${staffName} (${deviceName})`,
+      attestationType: 'none',
+      excludeCredentials,
+      authenticatorSelection: {
+        residentKey: 'preferred',
+        userVerification: 'preferred',
+      },
+    });
+
+    // Store challenge temporarily
+    const challengeId = `reg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    storeChallenge(challengeId, options.challenge);
+
+    console.log(`🔐 [WEBAUTHN] Registration options generated for ${staffName} (${deviceName})`);
+    res.json({ 
+      options, 
+      challengeId,
+      staffName,
+      deviceName 
+    });
+  } catch (err) {
+    console.error("❌ [WEBAUTHN] Error generating registration options:", err);
+    res.status(500).json({ error: "Failed to generate registration options" });
+  }
+});
+
+// Complete passkey registration
+app.post("/api/passkeys/register", authenticateToken, async (req, res) => {
+  if (req.user.id !== 'admin') {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+
+  try {
+    const { challengeId, credential, staffName, deviceName } = req.body;
+    
+    const expectedChallenge = getChallenge(challengeId);
+    if (!expectedChallenge) {
+      return res.status(400).json({ error: "Challenge expired or invalid. Please try again." });
+    }
+
+    // Determine expected origin based on request
+    const requestOrigin = req.headers.origin || req.headers.referer?.replace(/\/$/, '');
+    const expectedOrigins = Array.isArray(WEBAUTHN_CONFIG.origin) 
+      ? WEBAUTHN_CONFIG.origin 
+      : [WEBAUTHN_CONFIG.origin];
+
+    const verification = await verifyRegistrationResponse({
+      response: credential,
+      expectedChallenge,
+      expectedOrigin: expectedOrigins,
+      expectedRPID: WEBAUTHN_CONFIG.rpID,
+    });
+
+    if (!verification.verified || !verification.registrationInfo) {
+      console.warn(`🚫 [WEBAUTHN] Registration verification failed for ${staffName}`);
+      return res.status(400).json({ error: "Verification failed" });
+    }
+
+    const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+
+    // Save to database
+    await db.collection("passkeys").insertOne({
+      credentialId: Buffer.from(credentialID).toString('base64url'),
+      credentialPublicKey: Buffer.from(credentialPublicKey).toString('base64url'),
+      counter,
+      staffName,
+      deviceName,
+      registeredAt: new Date(),
+      lastUsed: null
+    });
+
+    const newCount = await db.collection("passkeys").countDocuments();
+    console.log(`✅ [WEBAUTHN] Passkey registered for ${staffName} (${deviceName}). Total: ${newCount}/${WEBAUTHN_CONFIG.maxPasskeys}`);
+    
+    res.json({ 
+      success: true, 
+      message: `Passkey registered for ${staffName} on ${deviceName}`,
+      totalPasskeys: newCount,
+      maxPasskeys: WEBAUTHN_CONFIG.maxPasskeys
+    });
+  } catch (err) {
+    console.error("❌ [WEBAUTHN] Error verifying registration:", err);
+    res.status(500).json({ error: "Failed to verify registration" });
+  }
+});
+
+// Delete a passkey (Admin only)
+app.delete("/api/passkeys/:id", authenticateToken, async (req, res) => {
+  if (req.user.id !== 'admin') {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+  
+  try {
+    const { id } = req.params;
+    const passkey = await db.collection("passkeys").findOne({ _id: new ObjectId(id) });
+    
+    if (!passkey) {
+      return res.status(404).json({ error: "Passkey not found" });
+    }
+
+    await db.collection("passkeys").deleteOne({ _id: new ObjectId(id) });
+    console.log(`🗑️ [WEBAUTHN] Passkey deleted: ${passkey.staffName} (${passkey.deviceName})`);
+    
+    res.json({ success: true, message: "Passkey deleted" });
+  } catch (err) {
+    console.error("❌ [WEBAUTHN] Error deleting passkey:", err);
+    res.status(500).json({ error: "Failed to delete passkey" });
+  }
+});
+
+// Start biometric login (no auth required - this IS the login)
+app.post("/api/passkeys/login-options", async (req, res) => {
+  try {
+    const passkeys = await db.collection("passkeys").find().toArray();
+    
+    if (passkeys.length === 0) {
+      return res.status(400).json({ error: "No passkeys registered. Login with password first." });
+    }
+
+    const allowCredentials = passkeys.map(p => ({
+      id: Buffer.from(p.credentialId, 'base64url'),
+      type: 'public-key',
+    }));
+
+    const options = await generateAuthenticationOptions({
+      rpID: WEBAUTHN_CONFIG.rpID,
+      allowCredentials,
+      userVerification: 'preferred',
+    });
+
+    // Store challenge temporarily
+    const challengeId = `auth-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    storeChallenge(challengeId, options.challenge);
+
+    console.log(`🔐 [WEBAUTHN] Authentication options generated`);
+    res.json({ options, challengeId });
+  } catch (err) {
+    console.error("❌ [WEBAUTHN] Error generating auth options:", err);
+    res.status(500).json({ error: "Failed to generate authentication options" });
+  }
+});
+
+// Complete biometric login
+app.post("/api/passkeys/login", async (req, res) => {
+  try {
+    const { challengeId, credential } = req.body;
+    
+    const expectedChallenge = getChallenge(challengeId);
+    if (!expectedChallenge) {
+      return res.status(400).json({ error: "Challenge expired or invalid. Please try again." });
+    }
+
+    // Find the passkey by credential ID
+    const credentialIdBase64 = credential.id;
+    const passkey = await db.collection("passkeys").findOne({ credentialId: credentialIdBase64 });
+    
+    if (!passkey) {
+      console.warn(`🚫 [WEBAUTHN] Unknown credential attempted login`);
+      return res.status(400).json({ error: "Passkey not recognized" });
+    }
+
+    // Determine expected origin
+    const expectedOrigins = Array.isArray(WEBAUTHN_CONFIG.origin) 
+      ? WEBAUTHN_CONFIG.origin 
+      : [WEBAUTHN_CONFIG.origin];
+
+    const verification = await verifyAuthenticationResponse({
+      response: credential,
+      expectedChallenge,
+      expectedOrigin: expectedOrigins,
+      expectedRPID: WEBAUTHN_CONFIG.rpID,
+      authenticator: {
+        credentialID: Buffer.from(passkey.credentialId, 'base64url'),
+        credentialPublicKey: Buffer.from(passkey.credentialPublicKey, 'base64url'),
+        counter: passkey.counter,
+      },
+    });
+
+    if (!verification.verified) {
+      console.warn(`🚫 [WEBAUTHN] Authentication verification failed for ${passkey.staffName}`);
+      return res.status(400).json({ error: "Authentication failed" });
+    }
+
+    // Update counter and last used
+    await db.collection("passkeys").updateOne(
+      { _id: passkey._id },
+      { 
+        $set: { 
+          counter: verification.authenticationInfo.newCounter,
+          lastUsed: new Date()
+        }
+      }
+    );
+
+    // Generate admin token (same as password login)
+    const adminToken = generateToken({ _id: 'admin', email: 'admin', name: passkey.staffName });
+    
+    console.log(`✅ [WEBAUTHN] Biometric login successful: ${passkey.staffName} (${passkey.deviceName})`);
+    res.json({ 
+      success: true, 
+      message: `Welcome back, ${passkey.staffName}! 🔐`,
+      token: adminToken,
+      staffName: passkey.staffName
+    });
+  } catch (err) {
+    console.error("❌ [WEBAUTHN] Error verifying authentication:", err);
+    res.status(500).json({ error: "Failed to verify authentication" });
+  }
+});
+
+// Check if any passkeys are registered (public - for showing biometric login button)
+app.get("/api/passkeys/available", async (req, res) => {
+  try {
+    const count = await db.collection("passkeys").countDocuments();
+    res.json({ available: count > 0, count });
+  } catch (err) {
+    res.json({ available: false, count: 0 });
+  }
+});
 
 // 🖥️ Server setup
 const port = process.env.PORT || 3000;
