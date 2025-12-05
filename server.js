@@ -128,6 +128,9 @@ export async function sendTelegramNotification(text) {
 
 const app = express();
 
+// Trust proxy (required for Railway/Cloudflare to get correct client IP)
+app.set('trust proxy', true);
+
 // =============================================================================
 // 🛡️ SECURITY & PERFORMANCE MIDDLEWARE
 // =============================================================================
@@ -693,6 +696,19 @@ function generateToken(user) {
 // 🔐 WEBAUTHN / PASSKEY AUTHENTICATION
 // =============================================================================
 
+// Helper function to ensure credentialId/credentialPublicKey is always a string
+// MongoDB might return Binary/Buffer objects, so we need to normalize them
+function normalizeCredentialString(value) {
+  if (!value) return '';
+  if (Buffer.isBuffer(value) || value?.constructor?.name === 'Binary') {
+    return value.toString('base64url');
+  }
+  if (typeof value !== 'string') {
+    return String(value);
+  }
+  return value;
+}
+
 // Get all registered passkeys (Admin only)
 app.get("/api/passkeys", authenticateToken, async (req, res) => {
   if (req.user.id !== 'admin') {
@@ -738,7 +754,8 @@ app.post("/api/passkeys/register-options", authenticateToken, async (req, res) =
     // Get existing credentials for this user to prevent duplicates
     const existingPasskeys = await db.collection("passkeys").find().toArray();
     const excludeCredentials = existingPasskeys.map(p => {
-      const idBuffer = Buffer.from(p.credentialId, 'base64url');
+      const credentialIdStr = normalizeCredentialString(p.credentialId);
+      const idBuffer = Buffer.from(credentialIdStr, 'base64url');
       return {
         id: new Uint8Array(idBuffer),
         type: 'public-key',
@@ -880,9 +897,10 @@ app.post("/api/passkeys/login-options", async (req, res) => {
     }
 
     const allowCredentials = passkeys.map(p => {
-      console.log(`🔐 [WEBAUTHN] Processing credential: ${p.credentialId?.substring(0, 20)}...`);
+      const credentialIdStr = normalizeCredentialString(p.credentialId);
+      console.log(`🔐 [WEBAUTHN] Processing credential: ${credentialIdStr?.substring(0, 20)}...`);
       // Convert base64url to Uint8Array
-      const idBuffer = Buffer.from(p.credentialId, 'base64url');
+      const idBuffer = Buffer.from(credentialIdStr, 'base64url');
       return {
         id: new Uint8Array(idBuffer),
         type: 'public-key',
@@ -934,14 +952,18 @@ app.post("/api/passkeys/login", async (req, res) => {
       ? WEBAUTHN_CONFIG.origin 
       : [WEBAUTHN_CONFIG.origin];
 
+    // Normalize credentialId and credentialPublicKey to strings (MongoDB might return Binary/Buffer)
+    const credentialIdStr = normalizeCredentialString(passkey.credentialId);
+    const credentialPublicKeyStr = normalizeCredentialString(passkey.credentialPublicKey);
+
     const verification = await verifyAuthenticationResponse({
       response: credential,
       expectedChallenge,
       expectedOrigin: expectedOrigins,
       expectedRPID: WEBAUTHN_CONFIG.rpID,
       authenticator: {
-        credentialID: new Uint8Array(Buffer.from(passkey.credentialId, 'base64url')),
-        credentialPublicKey: new Uint8Array(Buffer.from(passkey.credentialPublicKey, 'base64url')),
+        credentialID: new Uint8Array(Buffer.from(credentialIdStr, 'base64url')),
+        credentialPublicKey: new Uint8Array(Buffer.from(credentialPublicKeyStr, 'base64url')),
         counter: passkey.counter,
       },
     });
