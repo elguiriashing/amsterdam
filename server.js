@@ -3,16 +3,16 @@ dotenv.config(); // load env variables first
 
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
+import compression from "compression";
+import rateLimit from "express-rate-limit";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import fetch from 'node-fetch';
 import { startTelegramBot } from "./services/telegramwiper.js";
 
- // ✅ Launch the bot on server start
-
-
-
+console.log("🔧 [INIT] Loading server modules...");
 
 // --- Environment Variables (loaded from Railway) ---
 const ADMIN_PASS = process.env.ADMIN_PASS;
@@ -20,6 +20,15 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const MONGO_URI = process.env.MONGO_URI;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// --- CORS Allowed Origins ---
+const ALLOWED_ORIGINS = [
+  'https://socialclubamsterdam.com',
+  'https://www.socialclubamsterdam.com',
+  'http://localhost:5500',
+  'http://127.0.0.1:5500'
+];
+console.log("🌐 [CORS] Allowed origins:", ALLOWED_ORIGINS);
 
 // --- Telegram Notification Helper ---
 export async function sendTelegramNotification(text) {
@@ -67,8 +76,95 @@ export async function sendTelegramNotification(text) {
 
 
 const app = express();
-app.use(cors());
+
+// =============================================================================
+// 🛡️ SECURITY & PERFORMANCE MIDDLEWARE
+// =============================================================================
+
+// 1️⃣ Security Headers (helmet.js)
+console.log("🛡️ [SECURITY] Applying Helmet security headers...");
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: false // Disable CSP for API
+}));
+console.log("✅ [SECURITY] Helmet configured");
+
+// 2️⃣ CORS - Restrict to allowed origins
+console.log("🌐 [CORS] Configuring CORS restrictions...");
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) {
+      return callback(null, true);
+    }
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`⚠️ [CORS] Blocked request from unauthorized origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
+console.log("✅ [CORS] CORS configured");
+
+// 3️⃣ Compression - gzip responses for faster transfers
+console.log("⚡ [PERF] Enabling gzip compression...");
+app.use(compression());
+console.log("✅ [PERF] Compression enabled");
+
+// 4️⃣ JSON body parser
 app.use(express.json());
+
+// 5️⃣ Rate Limiting - Prevent abuse
+console.log("🚦 [SECURITY] Configuring rate limiters...");
+
+// General API limiter: 100 requests per 15 minutes
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res, next, options) => {
+    console.warn(`🚫 [RATE] General limit exceeded for IP: ${req.ip}`);
+    res.status(429).json(options.message);
+  }
+});
+
+// Auth limiter: 10 attempts per 15 minutes (stricter for login)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many login attempts, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res, next, options) => {
+    console.warn(`🚫 [RATE] Auth limit exceeded for IP: ${req.ip}`);
+    res.status(429).json(options.message);
+  }
+});
+
+// Prefill limiter: 5 submissions per hour
+const prefillLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  message: { error: 'Too many submissions, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res, next, options) => {
+    console.warn(`🚫 [RATE] Prefill limit exceeded for IP: ${req.ip}`);
+    res.status(429).json(options.message);
+  }
+});
+
+// Apply general rate limit to all API routes
+app.use('/api', generalLimiter);
+console.log("✅ [SECURITY] Rate limiters configured");
+
+console.log("=".repeat(60));
+console.log("🛡️ ALL SECURITY MIDDLEWARE LOADED SUCCESSFULLY");
+console.log("=".repeat(60));
 
 // 🌿 MongoDB Setup
 const uri = process.env.MONGO_URI;
@@ -102,8 +198,21 @@ app.get("/", (req, res) => {
   res.send("Server is live! 🌿");
 });
 
-// 🔐 Admin login (will be deprecated once full member auth is in)
-app.post("/api/admin-login", (req, res) => {
+// 💚 Health Check Endpoint (for uptime monitoring services)
+app.get("/health", (req, res) => {
+  const healthcheck = {
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    mongodb: db ? "connected" : "disconnected",
+    version: "1.1.0"
+  };
+  console.log(`💚 [HEALTH] Health check requested - MongoDB: ${healthcheck.mongodb}`);
+  res.status(200).json(healthcheck);
+});
+
+// 🔐 Admin login (with auth rate limiter)
+app.post("/api/admin-login", authLimiter, (req, res) => {
   const { password } = req.body;
   if (password === process.env.ADMIN_PASS) {
     const adminToken = generateToken({ _id: 'admin', email: 'admin', name: 'Admin' });
@@ -127,8 +236,8 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// 👤 Member login
-app.post("/api/login", async (req, res) => {
+// 👤 Member login (with auth rate limiter)
+app.post("/api/login", authLimiter, async (req, res) => {
   const { email, password } = req.body;
   const member = await db.collection("members").findOne({ email });
 
@@ -392,8 +501,8 @@ app.post("/api/update-content", authenticateToken, async (req, res) => {
   }
 });
 
-// 🧠 Prefill Memberships (public bluff form)
-app.post("/api/prefill", async (req, res) => {
+// 🧠 Prefill Memberships (public bluff form) - with prefill rate limiter
+app.post("/api/prefill", prefillLimiter, async (req, res) => {
   try {
     const { fullname, phone, email, ts } = req.body;
     // Save pre-fill data to a new 'prefills' collection
@@ -531,4 +640,12 @@ function generateToken(user) {
 
 // 🖥️ Server setup
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+app.listen(port, () => {
+  console.log("=".repeat(60));
+  console.log(`🚀 SERVER STARTED SUCCESSFULLY`);
+  console.log(`📍 Port: ${port}`);
+  console.log(`🔒 Security: Helmet, CORS, Rate Limiting ACTIVE`);
+  console.log(`⚡ Performance: Compression ENABLED`);
+  console.log(`💚 Health check: /health`);
+  console.log("=".repeat(60));
+});
