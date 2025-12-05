@@ -128,8 +128,9 @@ export async function sendTelegramNotification(text) {
 
 const app = express();
 
-// Trust proxy (required for Railway/Cloudflare to get correct client IP)
-app.set('trust proxy', true);
+// Trust proxy (required for Railway to get correct client IP)
+// Railway uses a single proxy, so we trust only the first hop
+app.set('trust proxy', 1);
 
 // =============================================================================
 // 🛡️ SECURITY & PERFORMANCE MIDDLEWARE
@@ -755,9 +756,9 @@ app.post("/api/passkeys/register-options", authenticateToken, async (req, res) =
     const existingPasskeys = await db.collection("passkeys").find().toArray();
     const excludeCredentials = existingPasskeys.map(p => {
       const credentialIdStr = normalizeCredentialString(p.credentialId);
-      const idBuffer = Buffer.from(credentialIdStr, 'base64url');
+      // SimpleWebAuthn expects base64url string in excludeCredentials, not Uint8Array
       return {
-        id: new Uint8Array(idBuffer),
+        id: credentialIdStr,
         type: 'public-key',
       };
     });
@@ -899,10 +900,9 @@ app.post("/api/passkeys/login-options", async (req, res) => {
     const allowCredentials = passkeys.map(p => {
       const credentialIdStr = normalizeCredentialString(p.credentialId);
       console.log(`🔐 [WEBAUTHN] Processing credential: ${credentialIdStr?.substring(0, 20)}...`);
-      // Convert base64url to Uint8Array
-      const idBuffer = Buffer.from(credentialIdStr, 'base64url');
+      // SimpleWebAuthn expects base64url string in allowCredentials, not Uint8Array
       return {
-        id: new Uint8Array(idBuffer),
+        id: credentialIdStr,
         type: 'public-key',
       };
     });
