@@ -40,15 +40,23 @@ const ALLOWED_ORIGINS = [
 console.log("🌐 [CORS] Allowed origins:", ALLOWED_ORIGINS);
 
 // --- WebAuthn Configuration ---
+// Detect if we're on Railway (production) or local development
+const isProduction = process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production' || process.env.MONGO_URI?.includes('mongodb+srv');
+
 const WEBAUTHN_CONFIG = {
   rpName: 'Social Club Amsterdam',
-  rpID: process.env.NODE_ENV === 'production' ? 'www.socialclubamsterdam.com' : 'localhost',
-  origin: process.env.NODE_ENV === 'production' 
+  rpID: isProduction ? 'www.socialclubamsterdam.com' : 'localhost',
+  origin: isProduction 
     ? ['https://www.socialclubamsterdam.com', 'https://socialclubamsterdam.com']
     : ['http://localhost:5500', 'http://127.0.0.1:5500'],
   maxPasskeys: 10, // Maximum number of passkeys allowed
 };
-console.log("🔐 [WEBAUTHN] Config:", { rpID: WEBAUTHN_CONFIG.rpID, maxPasskeys: WEBAUTHN_CONFIG.maxPasskeys });
+console.log("🔐 [WEBAUTHN] Config:", { 
+  isProduction, 
+  rpID: WEBAUTHN_CONFIG.rpID, 
+  origins: WEBAUTHN_CONFIG.origin,
+  maxPasskeys: WEBAUTHN_CONFIG.maxPasskeys 
+});
 
 // Temporary challenge store (in-memory) - challenges expire after 5 minutes
 const challengeStore = new Map();
@@ -729,11 +737,14 @@ app.post("/api/passkeys/register-options", authenticateToken, async (req, res) =
 
     // Generate a unique user ID for this registration
     const uniqueUserId = `staff-${staffName}-${Date.now()}`;
+    const userIdBytes = new TextEncoder().encode(uniqueUserId);
 
+    console.log(`🔐 [WEBAUTHN] Generating options for ${staffName} with rpID: ${WEBAUTHN_CONFIG.rpID}`);
+    
     const options = await generateRegistrationOptions({
       rpName: WEBAUTHN_CONFIG.rpName,
       rpID: WEBAUTHN_CONFIG.rpID,
-      userID: Buffer.from(uniqueUserId),
+      userID: userIdBytes,
       userName: staffName,
       userDisplayName: `${staffName} (${deviceName})`,
       attestationType: 'none',
@@ -748,7 +759,7 @@ app.post("/api/passkeys/register-options", authenticateToken, async (req, res) =
     const challengeId = `reg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     storeChallenge(challengeId, options.challenge);
 
-    console.log(`🔐 [WEBAUTHN] Registration options generated for ${staffName} (${deviceName})`);
+    console.log(`✅ [WEBAUTHN] Registration options generated for ${staffName} (${deviceName})`);
     res.json({ 
       options, 
       challengeId,
@@ -756,8 +767,9 @@ app.post("/api/passkeys/register-options", authenticateToken, async (req, res) =
       deviceName 
     });
   } catch (err) {
-    console.error("❌ [WEBAUTHN] Error generating registration options:", err);
-    res.status(500).json({ error: "Failed to generate registration options" });
+    console.error("❌ [WEBAUTHN] Error generating registration options:", err.message);
+    console.error("❌ [WEBAUTHN] Full error:", err);
+    res.status(500).json({ error: "Failed to generate registration options", details: err.message });
   }
 });
 
