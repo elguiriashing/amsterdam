@@ -266,15 +266,25 @@ app.get("/health", (req, res) => {
   res.status(200).json(healthcheck);
 });
 
-// 🔐 Admin login (with auth rate limiter)
-app.post("/api/admin-login", authLimiter, (req, res) => {
-  const { password } = req.body;
-  if (password === process.env.ADMIN_PASS) {
+// 🔐 Admin login – supports env-var master admin AND DB-based admins
+app.post("/api/admin-login", authLimiter, async (req, res) => {
+  const { password, email } = req.body;
+  // 1) Env-var master admin (no email required)
+  if (password === process.env.ADMIN_PASS && (!email || email === 'admin')) {
     const adminToken = generateToken({ _id: 'admin', email: 'admin', name: 'Admin' });
-    res.json({ success: true, message: "Welcome back boss 🌿", token: adminToken });
-  } else {
-    res.status(401).json({ success: false, message: "Incorrect password" });
+    return res.json({ success: true, message: "Welcome back boss 🌿", token: adminToken });
   }
+  // 2) DB-based admin accounts
+  if (email) {
+    try {
+      const admin = await db.collection("admins").findOne({ email });
+      if (admin && await bcrypt.compare(password, admin.password)) {
+        const token = generateToken({ _id: admin._id, email: admin.email, name: admin.name, role: admin.role });
+        return res.json({ success: true, message: `Welcome, ${admin.name}! 🌿`, token, role: admin.role });
+      }
+    } catch (err) { console.error("DB admin login error:", err); }
+  }
+  res.status(401).json({ success: false, message: "Incorrect credentials" });
 });
 
 // Middleware to protect member routes
@@ -289,6 +299,30 @@ function authenticateToken(req, res, next) {
     req.user = user;
     next();
   });
+}
+
+// Helper: Check if request is from any admin (env-based or DB-based)
+function isAdmin(req) {
+  return req.user.id === 'admin' || ['super_admin','owner','staff_admin'].includes(req.user.role);
+}
+
+// Tier → automatic discount %
+const TIER_DISCOUNTS = { normal: 0, vip: 20, vip_plus: 50, staff: 20 };
+
+// Audit log helper – fire and forget
+async function logAudit(action, details, req) {
+  try {
+    await db.collection("audit_logs").insertOne({
+      action,
+      details,
+      actorName: req.user?.name || req.user?.id || 'unknown',
+      adminId: String(req.user?.id || ''),
+      ip: req.ip,
+      timestamp: new Date()
+    });
+  } catch (err) {
+    console.error('⚠️ Audit log error:', err);
+  }
 }
 
 // 👤 Member login (with auth rate limiter)
@@ -327,15 +361,17 @@ app.post("/api/login", authLimiter, async (req, res) => {
 
 // 👥 Get all members (Admin only)
 app.get("/api/members", authenticateToken, async (req, res) => {
-  if (req.user.id !== 'admin') { // Simple admin check for now
-    return res.status(403).json({ message: 'Access denied' });
-  }
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Access denied' });
   try {
-    const members = await db.collection("members").find().toArray();
-    // Add a check for membership expiry here before sending to frontend
+    const { tier } = req.query;
+    let filter = {};
+    if (tier && TIER_DISCOUNTS[tier] !== undefined) filter = { tier };
+    const members = await db.collection("members").find(filter).toArray();
     const membersWithExpiryStatus = members.map(member => ({
       ...member,
-      isExpired: new Date(member.membershipEndDate) < new Date()
+      isExpired: new Date(member.membershipEndDate) < new Date(),
+      tier: member.tier || 'normal',
+      discount: member.discount !== undefined ? member.discount : (TIER_DISCOUNTS[member.tier || 'normal'] || 0)
     }));
     res.json(membersWithExpiryStatus);
   } catch (err) {
@@ -345,30 +381,24 @@ app.get("/api/members", authenticateToken, async (req, res) => {
 
 // ➕ Add a new member (Admin only)
 app.post("/api/members", authenticateToken, async (req, res) => {
-  if (req.user.id !== 'admin') {
-    return res.status(403).json({ message: 'Access denied' });
-  }
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Access denied' });
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, tier } = req.body;
     if (!name || !email || !password) {
       return res.status(400).json({ error: "Missing name, email, or password" });
     }
     const hashedPassword = await bcrypt.hash(password, 10);
-    console.log(`New member email: ${email}, Hashed Password: ${hashedPassword}`); // Add this line for debugging
-    
     const membershipEndDate = new Date();
     membershipEndDate.setFullYear(membershipEndDate.getFullYear() + 1);
-
     const balance = parseFloat(req.body.balance) || 0;
-
+    const resolvedTier = TIER_DISCOUNTS[tier] !== undefined ? tier : 'normal';
+    const discount = TIER_DISCOUNTS[resolvedTier];
     const result = await db.collection("members").insertOne({ 
-      name, 
-      email, 
-      password: hashedPassword, 
-      createdAt: new Date(), 
-      membershipEndDate,
-      balance: balance
+      name, email, password: hashedPassword, 
+      createdAt: new Date(), membershipEndDate,
+      balance, tier: resolvedTier, discount, activityLog: []
     });
+    await logAudit('member_add', `Added member: ${name} (${email}) tier:${resolvedTier}`, req);
     res.status(201).json({ success: true, message: "Member added.", memberId: result.insertedId });
   } catch (err) {
     res.status(500).json({ error: "Failed to add member", details: err });
@@ -377,12 +407,12 @@ app.post("/api/members", authenticateToken, async (req, res) => {
 
 // 🗑️ Delete a member (Admin only)
 app.delete("/api/members/:id", authenticateToken, async (req, res) => {
-  if (req.user.id !== 'admin') {
-    return res.status(403).json({ message: 'Access denied' });
-  }
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Access denied' });
   try {
     const id = req.params.id;
+    const member = await db.collection("members").findOne({ _id: new ObjectId(id) });
     await db.collection("members").deleteOne({ _id: new ObjectId(id) });
+    await logAudit('member_delete', `Deleted member: ${member?.name || id}`, req);
     res.json({ success: true, message: "Member deleted successfully" });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete member", details: err });
@@ -391,37 +421,27 @@ app.delete("/api/members/:id", authenticateToken, async (req, res) => {
 
 // ✏️ Update a member (Admin only)
 app.put("/api/members/:id", authenticateToken, async (req, res) => {
-  if (req.user.id !== 'admin') {
-    return res.status(403).json({ message: 'Access denied' });
-  }
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Access denied' });
   try {
     const id = req.params.id;
-    const { name, email, membershipEndDate, balance } = req.body;
-
+    const { name, email, membershipEndDate, balance, tier } = req.body;
     if (!name || !email || !membershipEndDate) {
       return res.status(400).json({ error: "Missing name, email, or membership end date" });
     }
-
-    // Note: Password changes should ideally be handled via a separate, secure flow.
-    // Here, we're allowing name, email, membershipEndDate, and balance to be updated.
+    const resolvedTier = TIER_DISCOUNTS[tier] !== undefined ? tier : 'normal';
+    const discount = TIER_DISCOUNTS[resolvedTier];
     const updateData = { 
-      name, 
-      email, 
-      membershipEndDate: new Date(membershipEndDate), 
-      updatedAt: new Date() 
+      name, email, membershipEndDate: new Date(membershipEndDate),
+      updatedAt: new Date(), tier: resolvedTier, discount
     };
-    
-    // Always update balance if provided (even if 0)
     if (balance !== undefined && balance !== null) {
       updateData.balance = parseFloat(balance) || 0;
     }
-    
     const result = await db.collection("members").updateOne(
-      { _id: new ObjectId(id) },
-      { $set: updateData }
+      { _id: new ObjectId(id) }, { $set: updateData }
     );
-    
     if (result.modifiedCount > 0 || result.matchedCount > 0) {
+      await logAudit('member_update', `Updated member: ${name} tier:${resolvedTier}`, req);
       res.json({ success: true, message: "Member updated." });
     } else {
       res.status(404).json({ success: false, message: "Member not found or no changes made." });
@@ -459,7 +479,16 @@ app.get("/api/member/profile", authenticateToken, async (req, res) => {
 // 🍃 Get full menu (Protected for members)
 app.get("/api/menu", authenticateToken, async (req, res) => {
   try {
-    const menu = await db.collection("menu").find().toArray();
+    const { status } = req.query;
+    let filter = {};
+    if (isAdmin(req)) {
+      if (status === 'active') filter = { status: { $ne: 'shelved' } };
+      else if (status === 'shelved') filter = { status: 'shelved' };
+      // no filter = all
+    } else {
+      filter = { status: { $ne: 'shelved' } };
+    }
+    const menu = await db.collection("menu").find(filter).toArray();
     res.json(menu);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch menu", details: err });
@@ -468,21 +497,18 @@ app.get("/api/menu", authenticateToken, async (req, res) => {
 
 // ➕ Add new strain to menu
 app.post("/api/menu", authenticateToken, async (req, res) => {
-  if (req.user.id !== 'admin') {
-    return res.status(403).json({ message: 'Access denied' });
-  }
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Access denied' });
   try {
-    const { strainName, type, thc, terpenes, description } = req.body;
+    const { strainName, type, thc, terpenes, description, category } = req.body;
     if (!strainName) return res.status(400).json({ error: "Missing strain name" });
-
+    const validCats = ['standard','top-shelf','budget','new-arrival'];
+    const resolvedCategory = validCats.includes(category) ? category : 'standard';
     await db.collection("menu").insertOne({
-      strainName,
-      type,
-      thc,
-      terpenes,
-      description,
-      addedAt: new Date(),
+      strainName, type, thc, terpenes, description,
+      category: resolvedCategory, status: 'active',
+      averageRating: 0, ratingCount: 0, addedAt: new Date(),
     });
+    await logAudit('strain_add', `Added strain: ${strainName} (${resolvedCategory})`, req);
     res.json({ success: true, message: "Strain added." });
   } catch (err) {
     res.status(500).json({ error: "Failed to add menu item", details: err });
@@ -491,12 +517,12 @@ app.post("/api/menu", authenticateToken, async (req, res) => {
 
 // 🗑️ Delete a strain
 app.delete("/api/menu/:id", authenticateToken, async (req, res) => {
-  if (req.user.id !== 'admin') {
-    return res.status(403).json({ message: 'Access denied' });
-  }
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Access denied' });
   try {
     const id = req.params.id;
+    const strain = await db.collection("menu").findOne({ _id: new ObjectId(id) });
     await db.collection("menu").deleteOne({ _id: new ObjectId(id) });
+    await logAudit('strain_delete', `Deleted strain: ${strain?.strainName || id}`, req);
     res.json({ success: true, message: "Deleted successfully" });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete menu item", details: err });
@@ -505,21 +531,64 @@ app.delete("/api/menu/:id", authenticateToken, async (req, res) => {
 
 // ✏️ Update a strain
 app.put("/api/menu/:id", authenticateToken, async (req, res) => {
-  if (req.user.id !== 'admin') {
-    return res.status(403).json({ message: 'Access denied' });
-  }
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Access denied' });
   try {
     const id = req.params.id;
-    const { strainName, type, thc, terpenes, description } = req.body;
+    const { strainName, type, thc, terpenes, description, category } = req.body;
     if (!strainName) return res.status(400).json({ error: "Missing strain name" });
-
+    const validCats = ['standard','top-shelf','budget','new-arrival'];
+    const resolvedCategory = validCats.includes(category) ? category : 'standard';
     await db.collection("menu").updateOne(
       { _id: new ObjectId(id) },
-      { $set: { strainName, type, thc, terpenes, description, updatedAt: new Date() } }
+      { $set: { strainName, type, thc, terpenes, description, category: resolvedCategory, updatedAt: new Date() } }
     );
+    await logAudit('strain_update', `Updated strain: ${strainName}`, req);
     res.json({ success: true, message: "Menu item updated." });
   } catch (err) {
     res.status(500).json({ error: "Failed to update menu item", details: err });
+  }
+});
+
+// 📦 Shelve / Unshelve a strain (soft delete)
+app.patch("/api/menu/:id/shelve", authenticateToken, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Access denied' });
+  try {
+    const id = req.params.id;
+    const strain = await db.collection("menu").findOne({ _id: new ObjectId(id) });
+    if (!strain) return res.status(404).json({ error: "Strain not found" });
+    const newStatus = strain.status === 'shelved' ? 'active' : 'shelved';
+    await db.collection("menu").updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status: newStatus, updatedAt: new Date() } }
+    );
+    await logAudit('strain_shelve', `${newStatus === 'shelved' ? 'Shelved' : 'Unshelved'} strain: ${strain.strainName}`, req);
+    res.json({ success: true, message: `Strain ${newStatus}.`, status: newStatus });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update strain status", details: err });
+  }
+});
+
+// ⭐ Rate a strain (authenticated members)
+app.post("/api/menu/:id/rate", authenticateToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const rating = parseInt(req.body.rating);
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: "Rating must be 1–5" });
+    }
+    const strain = await db.collection("menu").findOne({ _id: new ObjectId(id) });
+    if (!strain) return res.status(404).json({ error: "Strain not found" });
+    const currentCount = strain.ratingCount || 0;
+    const currentAvg = strain.averageRating || 0;
+    const newCount = currentCount + 1;
+    const newAvg = ((currentAvg * currentCount) + rating) / newCount;
+    await db.collection("menu").updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { averageRating: Math.round(newAvg * 10) / 10, ratingCount: newCount } }
+    );
+    res.json({ success: true, averageRating: Math.round(newAvg * 10) / 10, ratingCount: newCount });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to submit rating", details: err });
   }
 });
 
@@ -1157,6 +1226,88 @@ app.get("/api/passkeys/available", async (req, res) => {
     res.json({ available: count > 0, count });
   } catch (err) {
     res.json({ available: false, count: 0 });
+  }
+});
+
+// =============================================================================
+// 📊 DASHBOARD (Phase 5)
+// =============================================================================
+
+app.get("/api/dashboard/stats", authenticateToken, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Access denied' });
+  try {
+    const [totalMembers, activeStrains, shelvedStrains, upcomingEvents, pendingPrefills] = await Promise.all([
+      db.collection("members").countDocuments(),
+      db.collection("menu").countDocuments({ status: { $ne: 'shelved' } }),
+      db.collection("menu").countDocuments({ status: 'shelved' }),
+      db.collection("events").countDocuments({ date: { $gte: new Date() } }),
+      db.collection("prefills").countDocuments({ status: "pending" })
+    ]);
+    res.json({ totalMembers, activeStrains, shelvedStrains, upcomingEvents, pendingPrefills });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch stats", details: err });
+  }
+});
+
+app.get("/api/dashboard/activity", authenticateToken, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Access denied' });
+  try {
+    const activity = await db.collection("audit_logs").find().sort({ timestamp: -1 }).limit(20).toArray();
+    res.json(activity);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch activity", details: err });
+  }
+});
+
+// =============================================================================
+// 👑 ADMIN MANAGEMENT (Multi-admin support)
+// =============================================================================
+
+app.get("/api/admins", authenticateToken, async (req, res) => {
+  if (req.user.id !== 'admin' && req.user.role !== 'super_admin') {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+  try {
+    const admins = await db.collection("admins").find({}, { projection: { password: 0 } }).toArray();
+    res.json(admins);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch admins", details: err });
+  }
+});
+
+app.post("/api/admins", authenticateToken, async (req, res) => {
+  if (req.user.id !== 'admin' && req.user.role !== 'super_admin') {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+  try {
+    const { name, email, password, role } = req.body;
+    if (!name || !email || !password) return res.status(400).json({ error: "Missing required fields" });
+    const validRoles = ['super_admin','owner','staff_admin'];
+    const resolvedRole = validRoles.includes(role) ? role : 'staff_admin';
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = await db.collection("admins").insertOne({
+      name, email, password: hashedPassword, role: resolvedRole, createdAt: new Date()
+    });
+    await logAudit('admin_add', `Added admin: ${name} (${resolvedRole})`, req);
+    res.status(201).json({ success: true, message: "Admin added.", adminId: result.insertedId });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to add admin", details: err });
+  }
+});
+
+app.delete("/api/admins/:id", authenticateToken, async (req, res) => {
+  if (req.user.id !== 'admin' && req.user.role !== 'super_admin') {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+  try {
+    const { id } = req.params;
+    const admin = await db.collection("admins").findOne({ _id: new ObjectId(id) });
+    if (!admin) return res.status(404).json({ error: "Admin not found" });
+    await db.collection("admins").deleteOne({ _id: new ObjectId(id) });
+    await logAudit('admin_delete', `Deleted admin: ${admin.name}`, req);
+    res.json({ success: true, message: "Admin deleted." });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete admin", details: err });
   }
 });
 
