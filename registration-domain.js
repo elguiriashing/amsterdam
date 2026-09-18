@@ -12,6 +12,7 @@ export function adult(dob, now = new Date()) {
 }
 export function details(body) {
   const d = { firstName:text(body.firstName,80), surname:text(body.surname,120), dob:text(body.dob,10), email:text(body.email,254).toLowerCase(), phone:text(body.phone,30), address:{ line:text(body.address?.line), city:text(body.address?.city,100), postcode:text(body.address?.postcode,5), country:'ES' }, documentNumber:text(body.documentNumber,40).toUpperCase() };
+  if (d.documentNumber && !/^[A-Z0-9][A-Z0-9 .-]{2,39}$/.test(d.documentNumber)) throw new InputError('Enter a valid ID or passport number.');
   if (!d.firstName || !d.surname) throw new InputError('Enter name and surname.');
   if (!adult(d.dob)) throw new InputError('Enter a valid date of birth. Applicants must be 18 or older.');
   if (d.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) throw new InputError('Enter a valid email address.');

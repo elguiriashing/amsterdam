@@ -46,6 +46,7 @@ The Helvetica template font supports Western European text. Unsupported names fa
 5. Member number is the login identifier (legacy backend `email` field). Actual contact email is stored separately. Random password is displayed once; use Reset login if lost. Existing members retain their current login.
 
 ## Validation
+Runtime: Node 22 or newer. Nonbreaking dependency security updates are included. The existing SimpleWebAuthn v10 dependency retains one low-severity advisory requiring a separate major-version passkey migration; it is not silently upgraded here.
 `npm ci && npm test` runs unit tests and isolated MongoDB replica-set integration tests (downloads mongod on first run). No production data or Telegram used. CI runs on push/PR. Test concurrent number reservations, idempotent submissions/activation, staff access denial, age/address checks, and private field projection.
 
 ## Known operational limits

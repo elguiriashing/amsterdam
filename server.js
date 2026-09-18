@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 dotenv.config(); // load env variables first
 
 import express from "express";
-import { registrationRouter, setupRegistration, startRegistrationCleanup } from "./registration.js";
+import { registrationRouter, setupRegistration, startRegistrationCleanup, deleteRegistrationData } from "./registration.js";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
@@ -175,10 +175,10 @@ app.use(express.json());
 // 5️⃣ Rate Limiting - Prevent abuse
 console.log("🚦 [SECURITY] Configuring rate limiters...");
 
-// General API limiter: 100 requests per 15 minutes
+// General API limiter: 600 requests per 15 minutes for the shared staff Wi-Fi.
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 600,
   message: { error: 'Too many requests, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -395,6 +395,7 @@ app.delete("/api/members/:id", authenticateToken, async (req, res) => {
   try {
     const id = req.params.id;
     const member = await db.collection("members").findOne({ _id: new ObjectId(id) });
+    if (member?.registrationId) await deleteRegistrationData(db,new ObjectId(member.registrationId),true,true);
     await db.collection("members").deleteOne({ _id: new ObjectId(id) });
     await logAudit('member_delete', `Deleted member: ${member?.name || id}`, req);
     res.json({ success: true, message: "Member deleted successfully" });

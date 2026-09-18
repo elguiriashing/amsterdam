@@ -68,10 +68,10 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
    if(!Buffer.isBuffer(req.body)||!req.body.length)throw new InputError('Choose a JPEG, PNG or WebP photo.');
    let image;try {image=await sharp(req.body,{limitInputPixels:40000000}).rotate().resize({width:1800,height:1800,fit:'inside',withoutEnlargement:true}).jpeg({quality:85}).toBuffer();}catch{throw new InputError('Photo could not be read. Try a smaller JPEG or PNG.');}
    const db=getDB();const lock=crypto.randomUUID();
-   const acquired=await db.collection('prefills').updateOne({_id:p._id,status:{$in:['pending','prepared']},$or:[{imageLock:{$exists:false}},{imageLockUntil:{$lt:new Date()}}]},{$set:{imageLock:lock,imageLockUntil:new Date(Date.now()+120000)}});
+   const acquired=await db.collection('prefills').updateOne({_id:p._id,status:{$in:['pending','prepared',null]},$or:[{imageLock:{$exists:false}},{imageLockUntil:{$lt:new Date()}}]},{$set:{imageLock:lock,imageLockUntil:new Date(Date.now()+120000)}});
    if(!acquired.modifiedCount)throw new InputError('Another ID update is running. Try again shortly.',409);
    const key=`registration-ids/${p._id}.jpg`;
-   try {await put(key,image,'image/jpeg');await db.collection('prefills').updateOne({_id:p._id,imageLock:lock},{$set:{idKey:key,idUploadedAt:new Date()},$unset:{imageLock:'',imageLockUntil:''}});res.json({success:true});}
+   try {await put(key,image,'image/jpeg');await db.collection('prefills').updateOne({_id:p._id,imageLock:lock},{$set:{idKey:key,idUploadedAt:new Date(),reviewed:false},$unset:{imageLock:'',imageLockUntil:''}});res.json({success:true});}
    catch(e){await db.collection('prefills').updateOne({_id:p._id,imageLock:lock},{$unset:{imageLock:'',imageLockUntil:''}});throw e;}
  }
  router.put('/staff/prefills/:id/id-image',...staff,imageBody,run(async(req,res)=>{
@@ -79,22 +79,19 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
  }));
  router.get('/prefills',...staff,run(async(req,res)=>{
    const q=text(req.query.q,100),filter={};
-   if(req.query.status && ['pending','prepared','active'].includes(req.query.status))filter.status=req.query.status;
+   if(req.query.status && ['pending','prepared','active'].includes(req.query.status))filter.status=req.query.status==='pending'?{$in:['pending',null]}:req.query.status;
    if(q){const regex=q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');filter.$or=['fullname','email','phone'].map(k=>({[k]:{$regex:regex,$options:'i'}}));if(/^\d+$/.test(q))filter.$or.push({memberNumber:Number(q)});}
    const offset=Math.max(0,Math.min(100000,Number(req.query.offset)||0));
    const items=await getDB().collection('prefills').find(filter).sort({ts:-1}).skip(offset).limit(50).toArray();res.json(items.map(safe));
  }));
  router.get('/prefills/:id',...staff,run(async(req,res)=>{const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id)});if(!p)throw new InputError('Not found.',404);res.json(safe(p));}));
  router.patch('/prefills/:id',...staff,run(async(req,res)=>{
-   const d=details(req.body);const result=await getDB().collection('prefills').findOneAndUpdate({_id:oid(req.params.id),status:{$in:['pending','prepared']}},{$set:{...d,updatedAt:new Date(),reviewed:false}},{returnDocument:'after'});
+   const d=details(req.body);const result=await getDB().collection('prefills').findOneAndUpdate({_id:oid(req.params.id),status:{$in:['pending','prepared',null]}},{$set:{...d,updatedAt:new Date(),reviewed:false}},{returnDocument:'after'});
    if(!result)throw new InputError('Active registrations cannot be edited here.',409);await logAudit('registration_edit',req.params.id,req);res.json(safe(result));
  }));
  router.get('/prefills/:id/id-image',...staff,run(async(req,res)=>{const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id)});if(!p?.idKey)throw new InputError('No ID image.',404);const b=await get(p.idKey);await logAudit('registration_id_view',req.params.id,req);res.type('jpeg').send(b);}));
- router.delete('/prefills/:id/id-image',...staff,run(async(req,res)=>{const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id)});if(p?.imageLock)throw new InputError('Wait for the ID upload to finish.',409);if(p?.idKey)await remove(p.idKey);await getDB().collection('prefills').updateOne({_id:oid(req.params.id)},{$unset:{idKey:''}});await logAudit('registration_id_delete',req.params.id,req);res.json({success:true});}));
- router.delete('/prefills/:id',...staff,run(async(req,res)=>{
-   const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id)});if(p?.imageLock)throw new InputError('Wait for the ID upload to finish.',409);if(p?.status==='active')throw new InputError('Active member records must be handled through membership management.',409);
-   if(p?.idKey)await remove(p.idKey);await getDB().collection('prefills').deleteOne({_id:oid(req.params.id),status:{$ne:'active'}});await logAudit('registration_delete',req.params.id,req);res.json({success:true});
- }));
+ router.delete('/prefills/:id/id-image',...staff,run(async(req,res)=>{await deleteRegistrationData(getDB(),oid(req.params.id),false);await logAudit('registration_id_delete',req.params.id,req);res.json({success:true});}));
+ router.delete('/prefills/:id',...staff,run(async(req,res)=>{await deleteRegistrationData(getDB(),oid(req.params.id),true);await logAudit('registration_delete',req.params.id,req);res.json({success:true});}));
  router.get('/numbers',...staff,run(async(req,res)=>{const db=getDB();res.json({settings:await db.collection('registration_settings').findOne({_id:'numbers'}),recent:await db.collection('member_numbers').find({}).sort({_id:-1}).limit(30).toArray()});}));
  router.post('/numbers/setup',...staff,owner,run(async(req,res)=>{
    if(req.body.paperChecked!==true)throw new InputError('Check the last paper membership number first.');const next=numberValue(req.body.next),db=getDB();
@@ -168,8 +165,19 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
  router.use((err,req,res,next)=>{if(res.headersSent)return next(err);res.status(err.status|| (err.code===11000?409:500)).json({error:err instanceof InputError?err.message:err.code===11000?'This number or ID is already registered. Reload and review.':'Request failed. Please retry; if it persists contact the club.'});});
  return router;
 }
+// A shared database lock keeps upload, deletion and activation from racing.
+export async function deleteRegistrationData(db,id,wholeRecord=false,allowActive=false) {
+ const lock=crypto.randomUUID();
+ const p=await db.collection('prefills').findOneAndUpdate({_id:id,...(wholeRecord&&!allowActive?{status:{$ne:'active'}}:{}),$or:[{imageLock:{$exists:false}},{imageLockUntil:{$lt:new Date()}}]},{$set:{imageLock:lock,imageLockUntil:new Date(Date.now()+120000)}},{returnDocument:'after'});
+ if(!p){if(await db.collection('prefills').findOne({_id:id}))throw new InputError('Registration is active or another ID operation is running. Try again shortly.',409);return;}
+ try {
+   if(p.idKey)await remove(p.idKey);
+   if(wholeRecord)await db.collection('prefills').deleteOne({_id:id,imageLock:lock});
+   else await db.collection('prefills').updateOne({_id:id,imageLock:lock},{$unset:{idKey:'',idDeleteAt:''}});
+ } finally {await db.collection('prefills').updateOne({_id:id,imageLock:lock},{$unset:{imageLock:'',imageLockUntil:''}});}
+}
 export function startRegistrationCleanup(getDB) {
  let running=false;
- const clean=async()=>{if(running||!getDB())return;running=true;try{const db=getDB();const rows=await db.collection('prefills').find({imageLock:{$exists:false},$or:[{expiresAt:{$lt:new Date()}},{idDeleteAt:{$lt:new Date()},idKey:{$exists:true}}]}).limit(100).toArray();for(const p of rows){try{if(p.idKey)await remove(p.idKey);if(p.status==='active')await db.collection('prefills').updateOne({_id:p._id},{$unset:{idKey:'',idDeleteAt:''}});else await db.collection('prefills').deleteOne({_id:p._id,status:{$ne:'active'}});}catch{console.error('Registration retention cleanup failed; will retry.');}}}finally{running=false;}};
+ const clean=async()=>{if(running||!getDB())return;running=true;try{const db=getDB();const rows=await db.collection('prefills').find({$or:[{expiresAt:{$lt:new Date()}},{idDeleteAt:{$lt:new Date()},idKey:{$exists:true}}]}).limit(100).toArray();for(const p of rows){try{await deleteRegistrationData(db,p._id,p.status!=='active');}catch{console.error('Registration retention cleanup failed; will retry.');}}}finally{running=false;}};
  const timer=setInterval(()=>clean().catch(()=>console.error('Registration cleanup unavailable.')),3600000);timer.unref();return clean;
 }
