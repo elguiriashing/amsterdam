@@ -11,7 +11,7 @@ import {adult,details,ocrSuggestions} from '../registration-domain.js';
 let repl,client,db,api;const notifications=[];const storedImages=[];
 process.env.JWT_SECRET='test-only-secret';
 const body=()=>({firstName:'Test',surname:'Member',dob:'1990-06-15',phone:'+34600000000',email:'test@example.com',address:{line:'Calle Test 1',city:'Fuengirola',postcode:'29640',country:'ES'},documentNumber:'TEST'+crypto.randomBytes(5).toString('hex'),ageConfirmed:true,privacyAccepted:true,submissionKey:crypto.randomUUID()});
-before(async()=>{repl=await MongoMemoryReplSet.create({replSet:{count:1},binary:{version:'7.0.14'}});client=new MongoClient(repl.getUri());await client.connect();db=client.db('tests');await setupRegistration(db);const app=express();app.use(express.json());app.use('/',registrationRouter({getDB:()=>db,client,authenticateToken:(req,res,next)=>{if(!req.headers.authorization)return res.sendStatus(401);req.user={id:req.headers.authorization==='owner'?'admin':'member'};next();},isAdmin:req=>req.user.id==='admin',prefillLimiter:(req,res,next)=>next(),logAudit:async()=>{},notify:async message=>{notifications.push(message);},storeId:async (...args)=>{storedImages.push(args);}}));api=supertest(app);});
+before(async()=>{repl=await MongoMemoryReplSet.create({replSet:{count:1},binary:{version:'7.0.14'}});client=new MongoClient(repl.getUri());await client.connect();db=client.db('tests');await setupRegistration(db);const app=express();app.use(express.json());app.use('/',registrationRouter({getDB:()=>db,client,authenticateToken:(req,res,next)=>{if(!req.headers.authorization)return res.sendStatus(401);req.user={id:req.headers.authorization==='owner'?'admin':'member'};next();},isAdmin:req=>req.user.id==='admin',prefillLimiter:(req,res,next)=>next(),logAudit:async()=>{},notify:async message=>{notifications.push(message);},storeId:async (...args)=>{storedImages.push(args);},readId:async()=>Buffer.from('synthetic'),scanId:async()=>({suggestions:{firstName:'Anna',surname:'Example',documentNumber:'EXAMPLE123'},warnings:[]})}));api=supertest(app);});
 after(async()=>{await client?.close();await repl?.stop();});
 test('age and address validation reject malformed, underage and non-Spanish data',()=>{assert.equal(adult('2008-09-19',new Date('2026-09-19T12:00:00Z')),true);assert.equal(adult('2008-09-20',new Date('2026-09-19T12:00:00Z')),false);assert.equal(adult('2000-02-31'),false);assert.throws(()=>details({...body(),address:{country:'FR'}}));});
 test('member tokens cannot list registrations, reserve numbers or retrieve IDs',async()=>{for(const path of ['/prefills','/numbers','/prefills/aaaaaaaaaaaaaaaaaaaaaaaa/id-image'])assert.equal((await api.get(path).set('Authorization','member')).status,403);assert.equal((await api.post('/numbers/reserve').set('Authorization','member').send({})).status,403);});
@@ -37,4 +37,18 @@ test('staff can add an ID after activation; member number and signed review rema
  const p=await db.collection('prefills').findOne(query);assert.equal(p.status,'active');assert.equal(p.memberNumber,activated.body.memberNumber);assert.equal(p.reviewed,true);assert.ok(p.signedAt);assert.ok(p.idKey);assert.equal(storedImages.length,before+1);assert.equal(+p.idDeleteAt-(+p.idUploadedAt),7*86400000);
  await db.collection('prefills').updateOne(query,{$set:{imageLock:'busy',imageLockUntil:new Date(Date.now()+60000)}});
  assert.equal((await api.put(`/staff/prefills/${id}/id-image`).set('Authorization','owner').set('Content-Type','image/png').send(bytes)).status,409);
+});
+
+test('staff can scan and correct active identity without changing login or membership',async()=>{
+ const b=body(),r=await api.post('/prefill').send(b),id=r.body.id;
+ await api.post(`/prefills/${id}/prepare`).set('Authorization','owner').send({identityChecked:true,addressChecked:true});
+ await api.post(`/prefills/${id}/activate`).set('Authorization','owner').send({signed:true});
+ const before=await db.collection('members').findOne({registrationId:id});
+ await db.collection('prefills').updateOne({_id:new ObjectId(id)},{$set:{idKey:'synthetic'}});
+ assert.equal((await api.post(`/prefills/${id}/ocr`).send({})).status,401);
+ assert.equal((await api.post(`/prefills/${id}/ocr`).set('Authorization','member').send({})).status,403);
+ assert.equal((await api.post(`/prefills/${id}/ocr`).set('Authorization','owner').send({})).body.suggestions.documentNumber,'EXAMPLE123');
+ assert.equal((await api.patch(`/prefills/${id}`).set('Authorization','owner').send({...b,firstName:'Corrected'})).status,400);
+ const edit=await api.patch(`/prefills/${id}`).set('Authorization','owner').send({...b,firstName:'Corrected',identityChecked:true,balance:999,memberNumber:1});assert.equal(edit.status,200,JSON.stringify(edit.body));
+ const after=await db.collection('members').findOne({registrationId:id});assert.equal(after.name,'Corrected Member');assert.equal(after.password,before.password);assert.equal(after.memberNumber,before.memberNumber);assert.equal(after.balance,0);
 });

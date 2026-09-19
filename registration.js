@@ -1,3 +1,4 @@
+import {scanIdentity,ocrLanguages} from './registration-ocr.js';
 import { prefillNotification } from './registration-notification.js';
 import express from 'express';
 import crypto from 'node:crypto';
@@ -6,7 +7,7 @@ import { ObjectId } from 'mongodb';
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import sharp from 'sharp';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import { InputError, details, numberValue, text, digest, identityKey, ocrSuggestions } from './registration-domain.js';
+import { InputError, details, numberValue, text, digest, identityKey } from './registration-domain.js';
 
 const days=n=>n*86400000;
 const ready=()=>!!(process.env.R2_ENDPOINT && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET);
@@ -24,7 +25,7 @@ export async function setupRegistration(db) {
   await db.collection('members').createIndex({memberNumber:1},{unique:true,partialFilterExpression:{memberNumber:{$type:'number'}}});
   await db.collection('members').createIndex({identityHash:1},{unique:true,partialFilterExpression:{identityHash:{$type:'string'}}});
 }
-export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefillLimiter,logAudit,notify,storeId=put}) {
+export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefillLimiter,logAudit,notify,storeId=put,readId=get,scanId=scanIdentity}) {
  const router=express.Router();
  const run=fn=>(req,res,next)=>Promise.resolve().then(()=>{if(!getDB())throw new InputError('Database temporarily unavailable.',503);return fn(req,res);}).catch(next);
  const staff=[authenticateToken,(req,res,next)=>isAdmin(req)?next():res.status(403).json({error:'Staff access required.'})];
@@ -40,7 +41,7 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
    if(await db.collection('members').findOne({$or:[{memberNumber:n},{email:String(n)},{email:n}]},{session}))throw new InputError('Number already belongs to an existing member.',409);
    await db.collection('member_numbers').insertOne({_id:n,kind,ref,createdAt:new Date()},{session});return n;
  }
- router.get('/config',run(async(req,res)=>res.json({version:2,idUploads:ready(),ocr:ready()&&process.env.ID_OCR_ENABLED==='true',pendingDays:30,idRetentionDays:7})));
+ router.get('/config',run(async(req,res)=>res.json({version:2,idUploads:ready(),ocr:ready(),ocrLanguages,pendingDays:30,idRetentionDays:7})));
  router.post('/prefill',prefillLimiter,run(async(req,res)=>{
    if(req.body.ageConfirmed!==true||req.body.privacyAccepted!==true)throw new InputError('Confirm your age and read the privacy notice.');
    const d=details(req.body);const key=text(req.body.submissionKey,80);
@@ -90,8 +91,22 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
  }));
  router.get('/prefills/:id',...staff,run(async(req,res)=>{const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id)});if(!p)throw new InputError('Not found.',404);res.json(safe(p));}));
  router.patch('/prefills/:id',...staff,run(async(req,res)=>{
-   const d=details(req.body);const result=await getDB().collection('prefills').findOneAndUpdate({_id:oid(req.params.id),status:{$in:['pending','prepared',null]}},{$set:{...d,updatedAt:new Date(),reviewed:false}},{returnDocument:'after'});
-   if(!result)throw new InputError('Active registrations cannot be edited here.',409);await logAudit('registration_edit',req.params.id,req);res.json(safe(result));
+   const db=getDB(),id=oid(req.params.id);
+   const result=await transaction(async session=>{
+     const old=await db.collection('prefills').findOne({_id:id},{session});if(!old)throw new InputError('Registration not found.',404);
+     if(old.imageLock)throw new InputError('Wait for the ID upload to finish.',409);
+     const active=old.status==='active';
+     if(active&&req.body.identityChecked!==true)throw new InputError('Check the corrected Person details against the original ID before saving.');
+     const input=active?{...old,...Object.fromEntries(['firstName','surname','dob','documentNumber'].map(k=>[k,req.body[k]]))}:req.body;
+     const d=details(input);
+     if(active){
+       if(!d.documentNumber)throw new InputError('Record the ID/passport number.');
+       const identityHash=identityKey(d.documentNumber);
+       const duplicate=await db.collection('members').findOne({identityHash,registrationId:{$ne:req.params.id}},{session});if(duplicate)throw new InputError('This ID already belongs to another member.',409);
+       const member=await db.collection('members').updateOne({registrationId:req.params.id},{$set:{name:d.fullname,identityHash}},{session});if(!member.matchedCount)throw new InputError('Linked member not found.',409);
+     }
+     return db.collection('prefills').findOneAndUpdate({_id:id},{$set:{...d,updatedAt:new Date(),reviewed:false}},{session,returnDocument:'after'});
+   });await logAudit('registration_edit',req.params.id,req);res.json(safe(result));
  }));
  router.get('/prefills/:id/id-image',...staff,run(async(req,res)=>{const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id)});if(!p?.idKey)throw new InputError('No ID image.',404);const b=await get(p.idKey);await logAudit('registration_id_view',req.params.id,req);res.type('jpeg').send(b);}));
  router.delete('/prefills/:id/id-image',...staff,run(async(req,res)=>{await deleteRegistrationData(getDB(),oid(req.params.id),false);await logAudit('registration_id_delete',req.params.id,req);res.json({success:true});}));
@@ -142,11 +157,11 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
  router.post('/prefills/:id/reset-login',...staff,run(async(req,res)=>{
    const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id),status:'active'});if(!p?.documentNumber)throw new InputError('No government ID number is recorded for this member.',409);const password=p.documentNumber;const r=await getDB().collection('members').findOneAndUpdate({registrationId:req.params.id},{$set:{password:await bcrypt.hash(password,12)}},{returnDocument:'after'});if(!r)throw new InputError('Active member not found.',404);await logAudit('registration_reset_login',req.params.id,req);res.json({memberNumber:r.memberNumber,password});
  }));
- let ocrBusy=false;
  router.post('/prefills/:id/ocr',...staff,run(async(req,res)=>{
-   if(process.env.ID_OCR_ENABLED!=='true')throw new InputError('ID text extraction is not enabled. Staff can enter the details manually.',503);
-   if(ocrBusy)throw new InputError('Another ID scan is running. Try again shortly.',429);ocrBusy=true;let worker;
-   try{const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id)});if(!p?.idKey)throw new InputError('Upload an ID first.');const bytes=await get(p.idKey);const {createWorker}=await import('tesseract.js');worker=await createWorker('eng',1,{logger:()=>{}});const result=await Promise.race([worker.recognize(bytes),new Promise((_,reject)=>{const t=setTimeout(()=>reject(new InputError('Scan timed out. Enter details manually.',503)),45000);t.unref();})]);await logAudit('registration_ocr',req.params.id,req);res.json({text:result.data.text.slice(0,6000),suggestions:ocrSuggestions(result.data.text),notice:'Text extraction only. Check every field against the original document.'});}finally{if(worker)await worker.terminate();ocrBusy=false;}
+   const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id)});if(!p?.idKey)throw new InputError('Upload an ID first.');
+   if(p.imageLock)throw new InputError('Wait for the ID upload to finish.',409);
+   const result=await scanId(await readId(p.idKey),req.body.language||'eng');
+   await logAudit('registration_ocr',req.params.id,req);res.json({...result,notice:'Scan suggestions only. Check the original ID and save the Person fields.'});
  }));
  // Official legal text is supplied by the club, never generated by the app.
  router.get('/template',...staff,run(async(req,res)=>{const t=await getDB().collection('registration_settings').findOne({_id:'template'});res.json({ready:!!t,layout:t?.layout||{},version:t?.version,approved:t?.approved===true});}));
