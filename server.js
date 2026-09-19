@@ -1,3 +1,4 @@
+import {retailRouter,setupRetail} from './retail.js';
 import dotenv from "dotenv";
 dotenv.config(); // load env variables first
 
@@ -243,6 +244,7 @@ async function connectDB() {
     const connectedDB = client.db("Amsterdam0");
     await setupRegistration(connectedDB);
     await setupMemberAccount(connectedDB);
+    await setupRetail(connectedDB);
     db = connectedDB;
     console.log("✅ Connected to MongoDB!");
   } catch (err) {
@@ -611,6 +613,8 @@ app.post("/api/update-content", authenticateToken, async (req, res) => {
 });
 
 // Signup v2: private uploads, staff review and transaction-backed numbering.
+app.use('/api/retail',retailRouter({getDB:()=>db,client,authenticateToken,isAdmin,secret:JWT_SECRET}));
+
 app.use('/api/registration', registrationRouter({getDB:()=>db,client,authenticateToken,isAdmin,prefillLimiter,logAudit,notify:sendTelegramNotification}));
 startRegistrationCleanup(()=>db);
 app.post('/api/prefill', (req,res)=>res.status(409).json({error:'Please refresh the website to use the updated membership form.'}));
