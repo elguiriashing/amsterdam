@@ -24,7 +24,7 @@ export async function setupRegistration(db) {
   await db.collection('members').createIndex({memberNumber:1},{unique:true,partialFilterExpression:{memberNumber:{$type:'number'}}});
   await db.collection('members').createIndex({identityHash:1},{unique:true,partialFilterExpression:{identityHash:{$type:'string'}}});
 }
-export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefillLimiter,logAudit,notify}) {
+export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefillLimiter,logAudit,notify,storeId=put}) {
  const router=express.Router();
  const run=fn=>(req,res,next)=>Promise.resolve().then(()=>{if(!getDB())throw new InputError('Database temporarily unavailable.',503);return fn(req,res);}).catch(next);
  const staff=[authenticateToken,(req,res,next)=>isAdmin(req)?next():res.status(403).json({error:'Staff access required.'})];
@@ -68,18 +68,18 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
    if(!token||!p)throw new InputError('Upload link expired. Staff can add your ID when you arrive.',403);
    await upload(req,res,p);
  }));
- async function upload(req,res,p) {
+ async function upload(req,res,p,staffUpload=false) {
    if(!Buffer.isBuffer(req.body)||!req.body.length)throw new InputError('Choose a JPEG, PNG or WebP photo.');
    let image;try {image=await sharp(req.body,{limitInputPixels:40000000}).rotate().resize({width:1800,height:1800,fit:'inside',withoutEnlargement:true}).jpeg({quality:85}).toBuffer();}catch{throw new InputError('Photo could not be read. Try a smaller JPEG or PNG.');}
    const db=getDB();const lock=crypto.randomUUID();
-   const acquired=await db.collection('prefills').updateOne({_id:p._id,status:{$in:['pending','prepared',null]},$or:[{imageLock:{$exists:false}},{imageLockUntil:{$lt:new Date()}}]},{$set:{imageLock:lock,imageLockUntil:new Date(Date.now()+120000)}});
+   const acquired=await db.collection('prefills').updateOne({_id:p._id,status:{$in:staffUpload?['pending','prepared','active',null]:['pending','prepared',null]},$or:[{imageLock:{$exists:false}},{imageLockUntil:{$lt:new Date()}}]},{$set:{imageLock:lock,imageLockUntil:new Date(Date.now()+120000)}});
    if(!acquired.modifiedCount)throw new InputError('Another ID update is running. Try again shortly.',409);
    const key=`registration-ids/${p._id}.jpg`;
-   try {await put(key,image,'image/jpeg');await db.collection('prefills').updateOne({_id:p._id,imageLock:lock},{$set:{idKey:key,idUploadedAt:new Date(),reviewed:false},$unset:{imageLock:'',imageLockUntil:''}});res.json({success:true});}
+   try {const uploadedAt=new Date();await storeId(key,image,'image/jpeg');await db.collection('prefills').updateOne({_id:p._id,imageLock:lock},{$set:{idKey:key,idUploadedAt:uploadedAt,...(p.status==='active'?{idDeleteAt:new Date(+uploadedAt+days(7))}:{reviewed:false})},$unset:{imageLock:'',imageLockUntil:''}});if(staffUpload)await logAudit('registration_id_upload',String(p._id),req);res.json({success:true});}
    catch(e){await db.collection('prefills').updateOne({_id:p._id,imageLock:lock},{$unset:{imageLock:'',imageLockUntil:''}});throw e;}
  }
  router.put('/staff/prefills/:id/id-image',...staff,imageBody,run(async(req,res)=>{
-   const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id)});if(!p)throw new InputError('Registration not found.',404);await upload(req,res,p);
+   const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id)});if(!p)throw new InputError('Registration not found.',404);await upload(req,res,p,true);
  }));
  router.get('/prefills',...staff,run(async(req,res)=>{
    const q=text(req.query.q,100),filter={};
@@ -170,9 +170,9 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
  return router;
 }
 // A shared database lock keeps upload, deletion and activation from racing.
-export async function deleteRegistrationData(db,id,wholeRecord=false,allowActive=false) {
+export async function deleteRegistrationData(db,id,wholeRecord=false,allowActive=false,retentionOnly=false) {
  const lock=crypto.randomUUID();
- const p=await db.collection('prefills').findOneAndUpdate({_id:id,...(wholeRecord&&!allowActive?{status:{$ne:'active'}}:{}),$or:[{imageLock:{$exists:false}},{imageLockUntil:{$lt:new Date()}}]},{$set:{imageLock:lock,imageLockUntil:new Date(Date.now()+120000)}},{returnDocument:'after'});
+ const p=await db.collection('prefills').findOneAndUpdate({_id:id,...(retentionOnly?{$and:[{$or:[{expiresAt:{$lt:new Date()}},{idDeleteAt:{$lt:new Date()},idKey:{$exists:true}}]}]}:{}),...(wholeRecord&&!allowActive?{status:{$ne:'active'}}:{}),$or:[{imageLock:{$exists:false}},{imageLockUntil:{$lt:new Date()}}]},{$set:{imageLock:lock,imageLockUntil:new Date(Date.now()+120000)}},{returnDocument:'after'});
  if(!p){if(await db.collection('prefills').findOne({_id:id}))throw new InputError('Registration is active or another ID operation is running. Try again shortly.',409);return;}
  try {
    if(p.idKey)await remove(p.idKey);
@@ -182,6 +182,6 @@ export async function deleteRegistrationData(db,id,wholeRecord=false,allowActive
 }
 export function startRegistrationCleanup(getDB) {
  let running=false;
- const clean=async()=>{if(running||!getDB())return;running=true;try{const db=getDB();const rows=await db.collection('prefills').find({$or:[{expiresAt:{$lt:new Date()}},{idDeleteAt:{$lt:new Date()},idKey:{$exists:true}}]}).limit(100).toArray();for(const p of rows){try{await deleteRegistrationData(db,p._id,p.status!=='active');}catch{console.error('Registration retention cleanup failed; will retry.');}}}finally{running=false;}};
+ const clean=async()=>{if(running||!getDB())return;running=true;try{const db=getDB();const rows=await db.collection('prefills').find({$or:[{expiresAt:{$lt:new Date()}},{idDeleteAt:{$lt:new Date()},idKey:{$exists:true}}]}).limit(100).toArray();for(const p of rows){try{await deleteRegistrationData(db,p._id,p.status!=='active',false,true);}catch{console.error('Registration retention cleanup failed; will retry.');}}}finally{running=false;}};
  const timer=setInterval(()=>clean().catch(()=>console.error('Registration cleanup unavailable.')),3600000);timer.unref();return clean;
 }

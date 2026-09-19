@@ -3,14 +3,15 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import supertest from 'supertest';
 import crypto from 'node:crypto';
+import sharp from 'sharp';
 import {MongoMemoryReplSet} from 'mongodb-memory-server';
 import {MongoClient} from 'mongodb';
 import {registrationRouter,setupRegistration} from '../registration.js';
 import {adult,details,ocrSuggestions} from '../registration-domain.js';
-let repl,client,db,api;const notifications=[];
+let repl,client,db,api;const notifications=[];const storedImages=[];
 process.env.JWT_SECRET='test-only-secret';
 const body=()=>({firstName:'Test',surname:'Member',dob:'1990-06-15',phone:'+34600000000',email:'test@example.com',address:{line:'Calle Test 1',city:'Fuengirola',postcode:'29640',country:'ES'},documentNumber:'TEST'+crypto.randomBytes(5).toString('hex'),ageConfirmed:true,privacyAccepted:true,submissionKey:crypto.randomUUID()});
-before(async()=>{repl=await MongoMemoryReplSet.create({replSet:{count:1},binary:{version:'7.0.14'}});client=new MongoClient(repl.getUri());await client.connect();db=client.db('tests');await setupRegistration(db);const app=express();app.use(express.json());app.use('/',registrationRouter({getDB:()=>db,client,authenticateToken:(req,res,next)=>{if(!req.headers.authorization)return res.sendStatus(401);req.user={id:req.headers.authorization==='owner'?'admin':'member'};next();},isAdmin:req=>req.user.id==='admin',prefillLimiter:(req,res,next)=>next(),logAudit:async()=>{},notify:async message=>{notifications.push(message);}}));api=supertest(app);});
+before(async()=>{repl=await MongoMemoryReplSet.create({replSet:{count:1},binary:{version:'7.0.14'}});client=new MongoClient(repl.getUri());await client.connect();db=client.db('tests');await setupRegistration(db);const app=express();app.use(express.json());app.use('/',registrationRouter({getDB:()=>db,client,authenticateToken:(req,res,next)=>{if(!req.headers.authorization)return res.sendStatus(401);req.user={id:req.headers.authorization==='owner'?'admin':'member'};next();},isAdmin:req=>req.user.id==='admin',prefillLimiter:(req,res,next)=>next(),logAudit:async()=>{},notify:async message=>{notifications.push(message);},storeId:async (...args)=>{storedImages.push(args);}}));api=supertest(app);});
 after(async()=>{await client?.close();await repl?.stop();});
 test('age and address validation reject malformed, underage and non-Spanish data',()=>{assert.equal(adult('2008-09-19',new Date('2026-09-19T12:00:00Z')),true);assert.equal(adult('2008-09-20',new Date('2026-09-19T12:00:00Z')),false);assert.equal(adult('2000-02-31'),false);assert.throws(()=>details({...body(),address:{country:'FR'}}));});
 test('member tokens cannot list registrations, reserve numbers or retrieve IDs',async()=>{for(const path of ['/prefills','/numbers','/prefills/aaaaaaaaaaaaaaaaaaaaaaaa/id-image'])assert.equal((await api.get(path).set('Authorization','member')).status,403);assert.equal((await api.post('/numbers/reserve').set('Authorization','member').send({})).status,403);});
@@ -20,3 +21,20 @@ test('prepare and activate are idempotent; paper reservation can be claimed once
 test('edited prepared data must be reviewed again',async()=>{const b=body(),r=await api.post('/prefill').send(b),id=r.body.id;await api.post(`/prefills/${id}/prepare`).set('Authorization','owner').send({identityChecked:true,addressChecked:true});await api.patch(`/prefills/${id}`).set('Authorization','owner').send({...b,firstName:'Corrected'});assert.equal((await api.post(`/prefills/${id}/activate`).set('Authorization','owner').send({signed:true})).status,409);});
 test('private fields are excluded and missing storage fails closed',async()=>{const r=await api.post('/prefill').send(body());const p=await api.get(`/prefills/${r.body.id}`).set('Authorization','owner');assert.equal(p.body.uploadTokenHash,undefined);assert.equal(p.body.submissionKey,undefined);const cfg=await api.get('/config');assert.equal(cfg.body.idUploads,false);assert.equal((await api.put(`/prefills/${r.body.id}/id-image`).set('Content-Type','image/jpeg').set('X-Upload-Token','wrong').send(Buffer.from('not an image'))).status,403);});
 test('legacy pre-fills remain visible and an in-flight ID operation blocks deletion',async()=>{const legacy=await db.collection('prefills').insertOne({fullname:'Legacy Applicant',ts:new Date()});const list=await api.get('/prefills?status=pending').set('Authorization','owner');assert.ok(list.body.some(p=>p._id===String(legacy.insertedId)));assert.equal((await api.patch('/prefills/'+legacy.insertedId).set('Authorization','owner').send(body())).status,200);const b=body(),r=await api.post('/prefill').send(b),id=r.body.id;const {ObjectId}=await import('mongodb');await db.collection('prefills').updateOne({_id:new ObjectId(id)},{$set:{imageLock:'test-lock',imageLockUntil:new Date(Date.now()+60000)}});assert.equal((await api.delete(`/prefills/${id}`).set('Authorization','owner')).status,409);assert.equal(await db.collection('prefills').countDocuments({_id:new ObjectId(id)}),1);await db.collection('prefills').updateOne({_id:new ObjectId(id)},{$unset:{imageLock:'',imageLockUntil:''}});assert.equal((await api.delete(`/prefills/${id}`).set('Authorization','owner')).status,200);assert.equal(await db.collection('prefills').countDocuments({_id:new ObjectId(id)}),0);});
+
+test('staff can add an ID after activation; member number and signed review remain intact',async()=>{
+ const b=body(),r=await api.post('/prefill').send(b),id=r.body.id;
+ await api.post(`/prefills/${id}/prepare`).set('Authorization','owner').send({identityChecked:true,addressChecked:true});
+ const activated=await api.post(`/prefills/${id}/activate`).set('Authorization','owner').send({signed:true});assert.equal(activated.status,200);
+ const {ObjectId}=await import('mongodb');const query={_id:new ObjectId(id)};
+ await db.collection('prefills').updateOne(query,{$set:{idDeleteAt:new Date(0)}});
+ const bytes=await sharp({create:{width:2,height:2,channels:3,background:'#fff'}}).png().toBuffer();
+ assert.equal((await api.put(`/staff/prefills/${id}/id-image`).set('Content-Type','image/png').send(bytes)).status,401);
+ assert.equal((await api.put(`/staff/prefills/${id}/id-image`).set('Authorization','member').set('Content-Type','image/png').send(bytes)).status,403);
+ assert.equal((await api.put(`/prefills/${id}/id-image`).set('X-Upload-Token',r.body.uploadToken).set('Content-Type','image/png').send(bytes)).status,403);
+ const before=storedImages.length;
+ const uploaded=await api.put(`/staff/prefills/${id}/id-image`).set('Authorization','owner').set('Content-Type','image/png').send(bytes);assert.equal(uploaded.status,200,JSON.stringify(uploaded.body));
+ const p=await db.collection('prefills').findOne(query);assert.equal(p.status,'active');assert.equal(p.memberNumber,activated.body.memberNumber);assert.equal(p.reviewed,true);assert.ok(p.signedAt);assert.ok(p.idKey);assert.equal(storedImages.length,before+1);assert.equal(+p.idDeleteAt-(+p.idUploadedAt),7*86400000);
+ await db.collection('prefills').updateOne(query,{$set:{imageLock:'busy',imageLockUntil:new Date(Date.now()+60000)}});
+ assert.equal((await api.put(`/staff/prefills/${id}/id-image`).set('Authorization','owner').set('Content-Type','image/png').send(bytes)).status,409);
+});
