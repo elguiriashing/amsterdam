@@ -72,7 +72,7 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
    if(!Buffer.isBuffer(req.body)||!req.body.length)throw new InputError('Choose a JPEG, PNG or WebP photo.');
    let image;try {image=await sharp(req.body,{limitInputPixels:40000000}).rotate().resize({width:1800,height:1800,fit:'inside',withoutEnlargement:true}).jpeg({quality:85}).toBuffer();}catch{throw new InputError('Photo could not be read. Try a smaller JPEG or PNG.');}
    const db=getDB();const lock=crypto.randomUUID();
-   const acquired=await db.collection('prefills').updateOne({_id:p._id,status:{$in:staffUpload?['pending','prepared','active',null]:['pending','prepared',null]},$or:[{imageLock:{$exists:false}},{imageLockUntil:{$lt:new Date()}}]},{$set:{imageLock:lock,imageLockUntil:new Date(Date.now()+120000)}});
+   const acquired=await db.collection('prefills').updateOne({_id:p._id,status:{$eq:p.status??null,$in:staffUpload?['pending','prepared','active',null]:['pending','prepared',null]},$or:[{imageLock:{$exists:false}},{imageLockUntil:{$lt:new Date()}}]},{$set:{imageLock:lock,imageLockUntil:new Date(Date.now()+120000)}});
    if(!acquired.modifiedCount)throw new InputError('Another ID update is running. Try again shortly.',409);
    const key=`registration-ids/${p._id}.jpg`;
    try {const uploadedAt=new Date();await storeId(key,image,'image/jpeg');await db.collection('prefills').updateOne({_id:p._id,imageLock:lock},{$set:{idKey:key,idUploadedAt:uploadedAt,...(p.status==='active'?{idDeleteAt:new Date(+uploadedAt+days(7))}:{reviewed:false})},$unset:{imageLock:'',imageLockUntil:''}});if(staffUpload)await logAudit('registration_id_upload',String(p._id),req);res.json({success:true});}
