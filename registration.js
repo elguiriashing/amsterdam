@@ -1,3 +1,4 @@
+import { prefillNotification } from './registration-notification.js';
 import express from 'express';
 import crypto from 'node:crypto';
 import bcrypt from 'bcrypt';
@@ -49,7 +50,10 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
    try{p=await db.collection('prefills').findOneAndUpdate({submissionKey:key},{$setOnInsert:{...d,submissionKey:key,status:'pending',ts:now,expiresAt:new Date(+now+days(30)),privacyVersion:'2026-09-19',uploadTokenHash:digest(token),uploadExpiresAt:new Date(+now+1800000)}},{upsert:true,returnDocument:'after'});}catch(e){if(e.code!==11000)throw e;p=await db.collection('prefills').findOne({submissionKey:key});}
    // A repeat submission does not issue a new capability for an existing record.
    const created=p.uploadTokenHash===digest(token);
-   if(created) await notify('New membership pre-fill received. Review it in the staff panel: https://socialclubamsterdam.com/admin');
+   if(created) {
+     const total=await db.collection('prefills').countDocuments({});
+     await notify(prefillNotification(p,total));
+   }
    res.status(created?201:200).json({id:String(p._id),reference:String(p._id).slice(-8).toUpperCase(),uploadToken:created?token:undefined,alreadyReceived:!created});
  }));
  router.post('/walk-in',...staff,run(async(req,res)=>{
