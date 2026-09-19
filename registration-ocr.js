@@ -56,7 +56,7 @@ export async function scanIdentity(bytes,language='eng'){
  if(!Object.hasOwn(ocrLanguages,language))throw new InputError('Choose a supported scan language.');
  if(busy)throw new InputError('Another ID scan is running. Try again shortly.',429);busy=true;
  let worker,timer,expired=false,best=null,bestScore=-1;
- const update=data=>{const result=extractIdentity(data.text);if((data.confidence||0)<45){delete result.suggestions.firstName;delete result.suggestions.surname;result.warnings.push('Name text is unclear. Check the photo or enter the name manually.');}const score=Object.keys(result.suggestions).length*1000+(result.suggestions.documentNumber?5000:0)+(data.confidence||0);if(score>bestScore){bestScore=score;best={...result,text:data.text.slice(0,6000),confidence:data.confidence};}return result;};
+ const update=data=>{const result=extractIdentity(data.text);if((data.confidence||0)<45){if(!result.format)result.suggestions={};delete result.suggestions.firstName;delete result.suggestions.surname;result.warnings.push('Name text is unclear. Check the photo or enter the name manually.');}const score=Object.keys(result.suggestions).length*1000+(result.suggestions.documentNumber?5000:0)+(data.confidence||0);if(score>bestScore){bestScore=score;best={...result,text:data.text.slice(0,6000),confidence:data.confidence};}return result;};
  const job=(async()=>{
   const regions=await mrzRegions(bytes);
   worker=await createWorker('mrz',1,{langPath:fileURLToPath(new URL('./.ocr-model/',import.meta.url)),gzip:false,cacheMethod:'none',logger:()=>{},errorHandler:()=>{}});
