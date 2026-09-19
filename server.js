@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 dotenv.config(); // load env variables first
 
 import express from "express";
+import {memberAccountRouter,setupMemberAccount} from "./member-account.js";
 import {memberCardHandler} from "./member-card.js";
 import {createAuthenticate,isStaff} from "./staff-auth.js";
 import { registrationRouter, setupRegistration, startRegistrationCleanup, deleteRegistrationData } from "./registration.js";
@@ -241,6 +242,7 @@ async function connectDB() {
     await client.connect();
     const connectedDB = client.db("Amsterdam0");
     await setupRegistration(connectedDB);
+    await setupMemberAccount(connectedDB);
     db = connectedDB;
     console.log("✅ Connected to MongoDB!");
   } catch (err) {
@@ -429,6 +431,8 @@ app.put("/api/members/:id", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Failed to update member", details: err });
   }
 });
+
+app.use('/api/member/account',memberAccountRouter({getDB:()=>db,authenticateToken,isStaff,generateToken,authLimiter:rateLimit({windowMs:15*60*1000,max:60,standardHeaders:true,legacyHeaders:false,message:{error:"Too many attempts. Please try again later."}}),config:WEBAUTHN_CONFIG}));
 
 app.get('/api/member/card',authenticateToken,memberCardHandler({getDB:()=>db,isStaff}));
 
