@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 dotenv.config(); // load env variables first
 
 import express from "express";
+import {createAuthenticate,isStaff} from "./staff-auth.js";
 import { registrationRouter, setupRegistration, startRegistrationCleanup, deleteRegistrationData } from "./registration.js";
 import cors from "cors";
 import helmet from "helmet";
@@ -272,8 +273,9 @@ app.get("/health", (req, res) => {
 // 🔐 Admin login – supports env-var master admin AND DB-based admins
 app.post("/api/admin-login", authLimiter, async (req, res) => {
   const { password, email } = req.body;
+  if(typeof password!=="string"||!password||password.length>1024||(email!==undefined&&typeof email!=="string"))return res.status(401).json({success:false,message:"Incorrect credentials"});
   // 1) Env-var master admin (no email required)
-  if (password === process.env.ADMIN_PASS && (!email || email === 'admin')) {
+  if (process.env.ADMIN_PASS && password === process.env.ADMIN_PASS && (!email || email === 'admin')) {
     const adminToken = generateToken({ _id: 'admin', email: 'admin', name: 'Admin' });
     return res.json({ success: true, message: "Welcome back boss 🌿", token: adminToken });
   }
@@ -291,23 +293,12 @@ app.post("/api/admin-login", authLimiter, async (req, res) => {
 });
 
 // Middleware to protect member routes
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (token == null) return res.sendStatus(401); // No token
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403); // Invalid token
-    req.user = user;
-    next();
-  });
-}
-
-// Helper: Check if request is from any admin (env-based or DB-based)
-function isAdmin(req) {
-  return req.user.id === 'admin' || ['super_admin','owner','staff_admin'].includes(req.user.role);
-}
+const authenticateToken=createAuthenticate({secret:JWT_SECRET,getDB:()=>db});
+function isAdmin(req){return isStaff(req.user);}
+app.get('/api/staff/session',authenticateToken,(req,res)=>{
+ if(!isAdmin(req))return res.sendStatus(403);
+ res.json({authenticated:true,role:req.user.id==='admin'?'owner':req.user.role});
+});
 
 // Tier → automatic discount %
 const TIER_DISCOUNTS = { normal: 0, vip: 20, vip_plus: 50, staff: 20 };
@@ -976,7 +967,7 @@ app.delete("/api/passkeys/:id", authenticateToken, async (req, res) => {
 });
 
 // Start biometric login (no auth required - this IS the login)
-app.post("/api/passkeys/login-options", async (req, res) => {
+app.post("/api/passkeys/login-options", authLimiter, async (req, res) => {
   try {
     console.log(`🔐 [WEBAUTHN] Login options requested`);
     
@@ -1021,7 +1012,7 @@ app.post("/api/passkeys/login-options", async (req, res) => {
 });
 
 // Complete biometric login
-app.post("/api/passkeys/login", async (req, res) => {
+app.post("/api/passkeys/login", authLimiter, async (req, res) => {
   try {
     const { challengeId, credential } = req.body;
     
