@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 dotenv.config(); // load env variables first
 
 import express from "express";
+import {memberCardHandler} from "./member-card.js";
 import {createAuthenticate,isStaff} from "./staff-auth.js";
 import { registrationRouter, setupRegistration, startRegistrationCleanup, deleteRegistrationData } from "./registration.js";
 import cors from "cors";
@@ -428,6 +429,8 @@ app.put("/api/members/:id", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Failed to update member", details: err });
   }
 });
+
+app.get('/api/member/card',authenticateToken,memberCardHandler({getDB:()=>db,isStaff}));
 
 // 👤 Get member profile (for logged-in members)
 app.get("/api/member/profile", authenticateToken, async (req, res) => {
