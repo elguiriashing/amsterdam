@@ -1,0 +1,7 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {adult,details,numberValue,ocrSuggestions} from '../registration-domain.js';
+test('age boundary, invalid calendar dates, future dates',()=>{const now=new Date('2026-09-19T12:00:00Z');assert.equal(adult('2008-09-19',now),true);assert.equal(adult('2008-09-20',now),false);assert.equal(adult('2000-02-31',now),false);assert.equal(adult('2027-01-01',now),false);assert.equal(adult('2000-02-29',now),true);});
+test('member numbers reject unsafe, zero and fractional values',()=>{for(const n of [0,-1,1.5,'abc',Infinity,1000000000])assert.throws(()=>numberValue(n));assert.equal(numberValue('1234'),1234);});
+test('Spain address validation and required details',()=>{const b={firstName:'A',surname:'B',dob:'1990-01-01',phone:'+34600000000',address:{line:'Hotel, Calle 1',city:'Málaga',postcode:'29001',country:'ES'}};assert.equal(details(b).address.country,'ES');for(const postcode of ['00000','53000','SW1A','123'])assert.throws(()=>details({...b,address:{...b.address,postcode}}));assert.throws(()=>details({...b,address:{...b.address,country:'GB'}}));});
+test('passport MRZ extraction is a suggestion without identity verification',()=>{const r=ocrSuggestions('P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<\nL898902C36UTO7408122F1204159ZE184226B<<<<<10');assert.equal(r.surname,'ERIKSSON');assert.equal(r.firstName,'ANNA MARIA');assert.equal(r.dob,'1974-08-12');assert.equal(r.documentNumber,'L898902C3');});

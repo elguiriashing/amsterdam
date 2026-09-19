@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 dotenv.config(); // load env variables first
 
 import express from "express";
+import { registrationRouter, setupRegistration, startRegistrationCleanup, deleteRegistrationData } from "./registration.js";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
@@ -174,10 +175,10 @@ app.use(express.json());
 // 5️⃣ Rate Limiting - Prevent abuse
 console.log("🚦 [SECURITY] Configuring rate limiters...");
 
-// General API limiter: 100 requests per 15 minutes
+// General API limiter: 600 requests per 15 minutes for the shared staff Wi-Fi.
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 600,
   message: { error: 'Too many requests, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -200,10 +201,10 @@ const authLimiter = rateLimit({
   }
 });
 
-// Prefill limiter: 5 submissions per hour
+// Prefill/upload limiter: allows groups sharing the club Wi-Fi.
 const prefillLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 5,
+  max: 30,
   message: { error: 'Too many submissions, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -236,7 +237,9 @@ let db;
 async function connectDB() {
   try {
     await client.connect();
-    db = client.db("Amsterdam0");
+    const connectedDB = client.db("Amsterdam0");
+    await setupRegistration(connectedDB);
+    db = connectedDB;
     console.log("✅ Connected to MongoDB!");
   } catch (err) {
     console.error("❌ MongoDB connection error:", err);
@@ -328,6 +331,7 @@ async function logAudit(action, details, req) {
 // 👤 Member login (with auth rate limiter)
 app.post("/api/login", authLimiter, async (req, res) => {
   const { email, password } = req.body;
+  if (typeof email !== "string" || typeof password !== "string") return res.status(400).send("Invalid credentials");
   const member = await db.collection("members").findOne({ email });
 
   if (member == null) {
@@ -366,7 +370,7 @@ app.get("/api/members", authenticateToken, async (req, res) => {
     const { tier } = req.query;
     let filter = {};
     if (tier && TIER_DISCOUNTS[tier] !== undefined) filter = { tier };
-    const members = await db.collection("members").find(filter).toArray();
+    const members = await db.collection("members").find(filter, {projection:{password:0,identityHash:0}}).toArray();
     const membersWithExpiryStatus = members.map(member => ({
       ...member,
       isExpired: new Date(member.membershipEndDate) < new Date(),
@@ -379,30 +383,10 @@ app.get("/api/members", authenticateToken, async (req, res) => {
   }
 });
 
-// ➕ Add a new member (Admin only)
-app.post("/api/members", authenticateToken, async (req, res) => {
-  if (!isAdmin(req)) return res.status(403).json({ message: 'Access denied' });
-  try {
-    const { name, email, password, tier } = req.body;
-    if (!name || !email || !password) {
-      return res.status(400).json({ error: "Missing name, email, or password" });
-    }
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const membershipEndDate = new Date();
-    membershipEndDate.setFullYear(membershipEndDate.getFullYear() + 1);
-    const balance = parseFloat(req.body.balance) || 0;
-    const resolvedTier = TIER_DISCOUNTS[tier] !== undefined ? tier : 'normal';
-    const discount = TIER_DISCOUNTS[resolvedTier];
-    const result = await db.collection("members").insertOne({ 
-      name, email, password: hashedPassword, 
-      createdAt: new Date(), membershipEndDate,
-      balance, tier: resolvedTier, discount, activityLog: []
-    });
-    await logAudit('member_add', `Added member: ${name} (${email}) tier:${resolvedTier}`, req);
-    res.status(201).json({ success: true, message: "Member added.", memberId: result.insertedId });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to add member", details: err });
-  }
+// New memberships use the registration ledger; this legacy route must not bypass it.
+app.post('/api/members', authenticateToken, (req,res)=>{
+  if (!isAdmin(req)) return res.status(403).json({error:'Staff access required'});
+  res.status(409).json({error:'Use Registration Desk to allocate or reserve a member number.'});
 });
 
 // 🗑️ Delete a member (Admin only)
@@ -411,6 +395,7 @@ app.delete("/api/members/:id", authenticateToken, async (req, res) => {
   try {
     const id = req.params.id;
     const member = await db.collection("members").findOne({ _id: new ObjectId(id) });
+    if (member?.registrationId) await deleteRegistrationData(db,new ObjectId(member.registrationId),true,true);
     await db.collection("members").deleteOne({ _id: new ObjectId(id) });
     await logAudit('member_delete', `Deleted member: ${member?.name || id}`, req);
     res.json({ success: true, message: "Member deleted successfully" });
@@ -425,6 +410,8 @@ app.put("/api/members/:id", authenticateToken, async (req, res) => {
   try {
     const id = req.params.id;
     const { name, email, membershipEndDate, balance, tier } = req.body;
+    const current = await db.collection("members").findOne({_id:new ObjectId(id)});
+    if (current && current.email !== email && await db.collection("registration_settings").findOne({_id:"numbers"})) return res.status(409).json({error:"Member numbers cannot be changed here."});
     if (!name || !email || !membershipEndDate) {
       return res.status(400).json({ error: "Missing name, email, or membership end date" });
     }
@@ -625,28 +612,17 @@ app.post("/api/update-content", authenticateToken, async (req, res) => {
   }
 });
 
-// 🧠 Prefill Memberships (public bluff form) - with prefill rate limiter
-app.post("/api/prefill", prefillLimiter, async (req, res) => {
-  try {
-    const { fullname, phone, email, ts } = req.body;
-    // Save pre-fill data to a new 'prefills' collection
-    await db.collection("prefills").insertOne({ fullname, phone, email, ts: new Date(ts), status: "pending" });
-    
-    // Send Telegram notification
-    const notificationMessage = `📥<b>New Web Membership Prefill!</b>📥\n\n<b>Name:</b> ${fullname}\n<b>Email:</b> ${email}\n<b>Phone:</b> ${phone}\n<b>Received:</b> ${new Date(ts).toLocaleString()}\n\n📱<b>Check it out in the panel</b>📱\nhttps://www.socialclubamsterdam.com/admin`;
-    await sendTelegramNotification(notificationMessage);
-
-    res.status(200).send("Pre-fill data received");
-  } catch (err) {
-    console.error("Error saving pre-fill data:", err);
-    res.status(500).send("Error saving pre-fill data");
-  }
-});
+// Signup v2: private uploads, staff review and transaction-backed numbering.
+app.use('/api/registration', registrationRouter({getDB:()=>db,client,authenticateToken,isAdmin,prefillLimiter,logAudit,notify:sendTelegramNotification}));
+startRegistrationCleanup(()=>db);
+app.post('/api/prefill', (req,res)=>res.status(409).json({error:'Please refresh the website to use the updated membership form.'}));
 
 // ADMIN ONLY: Get all pre-fills
 app.get("/api/prefills", authenticateToken, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({error:"Staff access required"});
+  res.set("Cache-Control", "private, no-store");
   try {
-    const prefillData = await db.collection("prefills").find({}).sort({ ts: -1 }).toArray();
+    const prefillData = await db.collection("prefills").find({}, {projection:{uploadTokenHash:0,submissionKey:0,idKey:0}}).sort({ ts: -1 }).toArray();
     res.json(prefillData);
   } catch (err) {
     console.error("Error fetching pre-fills:", err);
@@ -654,21 +630,11 @@ app.get("/api/prefills", authenticateToken, async (req, res) => {
   }
 });
 
-// ADMIN ONLY: Delete a pre-fill
-app.delete("/api/prefills/:id", authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const result = await db.collection("prefills").deleteOne({ _id: new ObjectId(id) });
-    if (result.deletedCount === 0) {
-      return res.status(404).send("Pre-fill not found");
-    }
-    res.status(200).send("Pre-fill deleted");
-  } catch (err) {
-    console.error("Error deleting pre-fill:", err);
-    res.status(500).send("Error deleting pre-fill");
-  }
+// Legacy deletion must not leave a private ID object behind.
+app.delete('/api/prefills/:id', authenticateToken, (req,res)=>{
+  if (!isAdmin(req)) return res.status(403).json({error:'Staff access required'});
+  res.status(409).json({error:'Use the registration desk to delete pre-fills and their ID images.'});
 });
-
 // 📰 Members-only posts (for dashboard demo)
 app.get("/api/posts", authenticateToken, async (req, res) => {
   // For members, anyone authenticated can view posts
@@ -759,7 +725,7 @@ app.delete("/api/events/:id", authenticateToken, async (req, res) => {
 });
 
 function generateToken(user) {
-  return jwt.sign({ id: user._id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: "1h" });
+  return jwt.sign({ id: user._id, email: user.email, name: user.name, ...(user.role ? {role:user.role} : {}) }, JWT_SECRET, { expiresIn: "1h" });
 }
 
 // =============================================================================

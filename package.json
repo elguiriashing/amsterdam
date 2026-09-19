@@ -5,9 +5,11 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1136.0",
     "@simplewebauthn/server": "^10.0.1",
     "bcrypt": "^6.0.0",
     "compression": "^1.7.4",
@@ -20,9 +22,16 @@
     "mongodb": "^6.8.0",
     "node-cron": "^4.2.1",
     "node-fetch": "^2.7.0",
-    "telegraf": "^4.16.3"
+    "pdf-lib": "^1.17.1",
+    "sharp": "^0.35.4",
+    "telegraf": "^4.16.3",
+    "tesseract.js": "^6.0.1"
   },
   "engines": {
-    "node": ">=18.x"
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^10.4.3",
+    "supertest": "^7.2.2"
   }
 }
