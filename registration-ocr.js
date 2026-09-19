@@ -1,7 +1,10 @@
+import {fileURLToPath} from 'node:url';
+import {mrzRegions} from './mrz-regions.js';
+import {cleanMrz} from './mrz-image.js';
 import {dirname} from 'node:path';
 import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
-import {parse} from 'mrz';
+import {parse,states} from 'mrz';
 import sharp from 'sharp';
 import {createWorker} from 'tesseract.js';
 import {InputError,adult} from './registration-domain.js';
@@ -12,9 +15,21 @@ function birth(s){if(!/^\d{6}$/.test(s||''))return;const yy=+s.slice(0,2);for(co
 export function extractIdentity(raw){
  const suggestions={},warnings=[];let format=null,valid=false;
  const lines=String(raw).slice(0,20000).split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
- const mrz=lines.map(s=>s.toUpperCase().replace(/[«‹]/g,'<').replace(/\s/g,'')).filter(s=>/^[A-Z0-9<]{28,44}$/.test(s));
+ const normalized=lines.map(s=>s.toUpperCase().replace(/[«‹]/g,'<').replace(/\s/g,''));
+ const mrz=[];
+ for(let line of normalized){
+  const passportStart=line.search(/P[<A-Z][A-Z]{3}[A-Z]{2,}<</);if(passportStart>0&&passportStart<4)line=line.slice(passportStart);
+  if(/^P/.test(line)&&line.includes('<<'))line=line.replace(/(<{4,})[0-9].*$/,'$1');
+  if(/^[PF]/.test(line)&&line.includes('<<')){
+   // OCR often drops trailing filler marks, or confuses the passport type glyph.
+   const country=[1,2].find(i=>Object.hasOwn(states,line.slice(i,i+3))&&line.slice(i+3).includes('<<'));
+   if(country!==undefined&&line.length>=28&&line.length<=46){line='P<'+line.slice(country);if(line.length>44&&/^<+$/.test(line.slice(44)))line=line.slice(0,44);line=line.padEnd(44,'<');}
+  }
+  if(mrz.at(-1)?.startsWith('P<')&&/^[A-Z0-9<]{9}\d[A-Z<]{3}[A-Z0-9]{7}[MF<]/.test(line)&&line.length>=30&&line.length<44)line=line.slice(0,-2)+'<'.repeat(44-line.length)+line.slice(-2);
+  if(/^[A-Z0-9<]{28,44}$/.test(line))mrz.push(line);
+ }
  for(let i=0;i<mrz.length;i++)for(const count of [3,2]){try{
-  const r=parse(mrz.slice(i,i+count),{autocorrect:true});if(!r.fields.lastName&&!r.fields.firstName)continue;
+  const r=parse(mrz.slice(i,i+count),{autocorrect:true});if(!['TD1','TD2','TD3'].includes(r.format))continue;if(!r.fields.lastName&&!r.fields.firstName)continue;
   const candidate={};if(r.fields.firstName)candidate.firstName=r.fields.firstName;if(r.fields.lastName)candidate.surname=r.fields.lastName;
   // Never fill a document number or date whose check digit failed.
   const check=field=>!r.details.some(d=>d.field===field&&d.valid===false);
@@ -40,24 +55,40 @@ let busy=false;
 export async function scanIdentity(bytes,language='eng'){
  if(!Object.hasOwn(ocrLanguages,language))throw new InputError('Choose a supported scan language.');
  if(busy)throw new InputError('Another ID scan is running. Try again shortly.',429);busy=true;
- let worker,timer,expired=false;
+ let worker,timer,expired=false,best=null,bestScore=-1;
+ const update=data=>{const result=extractIdentity(data.text);if((data.confidence||0)<45){if(!result.format)result.suggestions={};delete result.suggestions.firstName;delete result.suggestions.surname;result.warnings.push('Name text is unclear. Check the photo or enter the name manually.');}const score=Object.keys(result.suggestions).length*1000+(result.suggestions.documentNumber?5000:0)+(data.confidence||0);if(score>bestScore){bestScore=score;best={...result,text:data.text.slice(0,6000),confidence:data.confidence};}return result;};
  const job=(async()=>{
+  const regions=await mrzRegions(bytes);
+  worker=await createWorker('mrz',1,{langPath:fileURLToPath(new URL('./.ocr-model/',import.meta.url)),gzip:false,cacheMethod:'none',logger:()=>{},errorHandler:()=>{}});
+  await worker.setParameters({tessedit_pageseg_mode:'6',tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',user_defined_dpi:'300'});
+  for(const region of regions){for(const flip of [false,true]){
+   if(expired)throw new Error('Expired');
+   const image=flip?await sharp(region.image).rotate(180).toBuffer():region.image;
+   let promising=false;
+   {const {data}=await worker.recognize(await sharp(image).threshold(200).png().toBuffer(),{rotateAuto:true});update(data);}
+   for(const threshold of [160,200,100]){const {data}=await worker.recognize(await sharp(image).threshold(threshold).png().toBuffer());update(data);if((data.text.match(/</g)||[]).length>5&&/[A-Z]{3}/.test(data.text))promising=true;}
+   if(promising){
+    for(const threshold of [80,180,200]){if(expired)throw new Error('Expired');const {data}=await worker.recognize(await sharp(image).threshold(threshold).png().toBuffer());update(data);}
+    for(const threshold of [210,130]){if(expired)throw new Error('Expired');const {data}=await worker.recognize(await cleanMrz(image,threshold));update(data);}
+   }
+   if(best?.suggestions.documentNumber&&best.suggestions.firstName&&best.suggestions.surname&&best.confidence>=45)return best;
+  }}
+  await worker.terminate();worker=null;
+  if(expired)throw new Error('Expired');
   worker=await createWorker(language==='eng'?'eng':`eng+${language}`,1,{logger:()=>{},errorHandler:()=>{},...(language==='eng'?{cacheMethod:'none',langPath:dirname(require.resolve('@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz'))}:{})});
   if(expired){await worker.terminate();throw new Error('Expired');}
   await worker.setParameters({tessedit_pageseg_mode:'3'});
   const base=await sharp(bytes,{limitInputPixels:40000000}).rotate().resize({width:2200,height:2200,fit:'inside'}).grayscale().normalize().toBuffer();
-  let best=null,bestScore=-1;
+
   for(const angle of [0,90,270,180]){
    if(expired)throw new Error('Expired');
    const image=angle?await sharp(base).rotate(angle).toBuffer():base;
-   const {data}=await worker.recognize(image,{rotateAuto:true});const result=extractIdentity(data.text);
-   const score=Object.keys(result.suggestions).length*100+(result.valid?1000:0)+(data.confidence||0);
-   if(score>bestScore){bestScore=score;best={...result,text:data.text.slice(0,6000),confidence:data.confidence};}
+   const {data}=await worker.recognize(image,{rotateAuto:true});const result=update(data);
    if(result.valid&&result.suggestions.documentNumber)break;
   }
   return best;
  })();
  try{return await Promise.race([job,new Promise((_,reject)=>{timer=setTimeout(()=>{expired=true;reject(new InputError('Scan timed out. Try a sharp, close-up photo with the document upright.',503));},80000);})]);}
- catch(e){if(e instanceof InputError)throw e;throw new InputError('The scan could not complete. Try a clearer photo or another scan language.',503);}
+ catch(e){if(expired&&best&&Object.keys(best.suggestions).length)return {...best,warnings:[...best.warnings,'Scan time limit reached; check the partial results.']};if(e instanceof InputError)throw e;throw new InputError('The scan could not complete. Try a clearer photo or another scan language.',503);}
  finally{clearTimeout(timer);if(worker)await worker.terminate().catch(()=>{});busy=false;}
 }

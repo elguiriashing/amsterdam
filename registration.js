@@ -63,6 +63,12 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
    res.json(safe(p));
  }));
  const imageBody=express.raw({type:['image/jpeg','image/png','image/webp'],limit:'8mb'});
+ // Scan a walk-in photo before creating a registration; do not persist it here.
+ router.post('/staff/scan-id',...staff,imageBody,run(async(req,res)=>{
+   if(!Buffer.isBuffer(req.body)||!req.body.length)throw new InputError('Choose an ID photo first.');
+   const result=await scanId(req.body,req.query.language||'eng');
+   await logAudit('registration_walkin_ocr','unsaved',req);res.json(result);
+ }));
  router.put('/prefills/:id/id-image',prefillLimiter,imageBody,run(async(req,res)=>{
    const db=getDB(),id=oid(req.params.id),token=text(req.headers['x-upload-token'],100);
    const p=await db.collection('prefills').findOne({_id:id,uploadTokenHash:digest(token),uploadExpiresAt:{$gt:new Date()},status:'pending'});
