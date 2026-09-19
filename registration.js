@@ -123,12 +123,14 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
    });await logAudit('registration_prepare',String(id),req);res.json(safe(p));
  }));
  router.post('/prefills/:id/activate',...staff,run(async(req,res)=>{
-   if(req.body.signed!==true)throw new InputError('Confirm the official paper form was signed.');const db=getDB(),id=oid(req.params.id),password=crypto.randomBytes(12).toString('base64url'),hash=await bcrypt.hash(password,12);
+   if(req.body.signed!==true)throw new InputError('Confirm the official paper form was signed.');const db=getDB(),id=oid(req.params.id);
    const result=await transaction(async session=>{
      const p=await db.collection('prefills').findOne({_id:id},{session});if(!p?.memberNumber)throw new InputError('Prepare and assign a number first.',409);
      if(p.status==='active')return {alreadyActive:true,memberNumber:p.memberNumber};
      if(p.imageLock)throw new InputError('Wait for the ID upload to finish.',409);
      if(!p.reviewed)throw new InputError('Details changed: verify the ID/address again using Prepare.',409);details(p);
+     if(!p.documentNumber)throw new InputError('Record the ID/passport number before activating membership.');
+     const password=p.documentNumber,hash=await bcrypt.hash(password,12);
      const identityHash=identityKey(p.documentNumber);
      if(identityHash&&await db.collection('members').findOne({identityHash},{session}))throw new InputError('This ID already belongs to a member. Review the existing membership.',409);
      const end=new Date();end.setFullYear(end.getFullYear()+1);
@@ -138,7 +140,7 @@ export function registrationRouter({getDB,client,authenticateToken,isAdmin,prefi
  }));
  router.post('/prefills/:id/review',...staff,run(async(req,res)=>{if(req.body.identityChecked!==true||req.body.addressChecked!==true)throw new InputError('Verify the ID and address.');await getDB().collection('prefills').updateOne({_id:oid(req.params.id),status:'prepared'},{$set:{reviewed:true,reviewedAt:new Date()}});res.json({success:true});}));
  router.post('/prefills/:id/reset-login',...staff,run(async(req,res)=>{
-   const password=crypto.randomBytes(12).toString('base64url');const r=await getDB().collection('members').findOneAndUpdate({registrationId:req.params.id},{$set:{password:await bcrypt.hash(password,12)}},{returnDocument:'after'});if(!r)throw new InputError('Active member not found.',404);await logAudit('registration_reset_login',req.params.id,req);res.json({memberNumber:r.memberNumber,password});
+   const p=await getDB().collection('prefills').findOne({_id:oid(req.params.id),status:'active'});if(!p?.documentNumber)throw new InputError('No government ID number is recorded for this member.',409);const password=p.documentNumber;const r=await getDB().collection('members').findOneAndUpdate({registrationId:req.params.id},{$set:{password:await bcrypt.hash(password,12)}},{returnDocument:'after'});if(!r)throw new InputError('Active member not found.',404);await logAudit('registration_reset_login',req.params.id,req);res.json({memberNumber:r.memberNumber,password});
  }));
  let ocrBusy=false;
  router.post('/prefills/:id/ocr',...staff,run(async(req,res)=>{

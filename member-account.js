@@ -15,7 +15,6 @@ export function memberAccountRouter({getDB,authenticateToken,isStaff,generateTok
  const active=m=>m&&(!m.membershipEndDate||new Date(m.membershipEndDate)>=new Date());
  async function requireMember(req,res,next){try{if(isStaff(req.user)||!ObjectId.isValid(req.user.id))return res.sendStatus(403);const m=await collection('members').findOne({_id:new ObjectId(req.user.id)});if(!m)return res.sendStatus(401);req.member=m;next();}catch(e){next(e);}}
  const protectedRoute=[authenticateToken,requireMember];
- const passwordOK=async(m,p)=>typeof p==='string'&&Buffer.byteLength(p)<=72&&await bcrypt.compare(p,m.password);
  async function challenge(purpose,options,memberId=null,extra={}){const id=crypto.randomBytes(32).toString('base64url');await collection('member_passkey_challenges').insertOne({_id:id,purpose,challenge:options.challenge,memberId,expiresAt:new Date(Date.now()+300000),...extra});return {challengeId:id,options};}
  async function consume(req,purpose,memberId=null){const id=req.body.challengeId;if(typeof id!=='string')fail('Please start again.');const c=await collection('member_passkey_challenges').findOneAndDelete({_id:id,purpose,memberId,expiresAt:{$gt:new Date()}});if(!c)fail('Request expired or already used. Please start again.');return c;}
  router.use((req,res,next)=>{res.set('Cache-Control','private, no-store');next();});
@@ -25,14 +24,14 @@ export function memberAccountRouter({getDB,authenticateToken,isStaff,generateTok
   await collection('members').updateOne({_id:req.member._id},{$set:{contactEmail:contactEmail.trim(),phone:phone.trim()}});res.json({success:true});
  }));
  router.post('/password',authLimiter,...protectedRoute,wrap(async(req,res)=>{
-  const {currentPassword,newPassword}=req.body;if(!await passwordOK(req.member,currentPassword))fail('Current password is incorrect.',403);
+  const {newPassword}=req.body;
   if(typeof newPassword!=='string'||newPassword.length<12||Buffer.byteLength(newPassword)>72)fail('Use at least 12 characters, up to 72 bytes.');
   const result=await collection('members').updateOne({_id:req.member._id,password:req.member.password},{$set:{password:await bcrypt.hash(newPassword,12)}});if(!result.modifiedCount)fail('Account changed. Please try again.',409);res.json({success:true});
  }));
  router.get('/passkeys',...protectedRoute,wrap(async(req,res)=>{const keys=await collection('member_passkeys').find({memberId:String(req.member._id)},{projection:{name:1,createdAt:1,lastUsed:1}}).toArray();res.json({passkeys:keys});}));
  router.delete('/passkeys/:id',...protectedRoute,wrap(async(req,res)=>{if(!ObjectId.isValid(req.params.id))fail('Invalid passkey.');await collection('member_passkeys').deleteOne({_id:new ObjectId(req.params.id),memberId:String(req.member._id)});res.json({success:true});}));
  router.post('/passkeys/register-options',authLimiter,...protectedRoute,wrap(async(req,res)=>{
-  const m=req.member;if(!active(m))fail('Membership expired. Please contact staff.',403);if(!await passwordOK(m,req.body.currentPassword))fail('Enter your current password to enable biometrics.',403);
+  const m=req.member;if(!active(m))fail('Membership expired. Please contact staff.',403);
   const keys=await collection('member_passkeys').find({memberId:String(m._id)}).toArray();if(keys.length>=10)fail('Remove an old passkey first (maximum 10).');
   const name=typeof req.body.name==='string'?req.body.name.trim().slice(0,60):'';if(!name)fail('Give this passkey a name.');
   const options=await wa.generateRegistrationOptions({rpName:config.rpName+' Members',rpID:config.rpID,userID:Buffer.from('member:'+m._id),userName:String(m.memberNumber||m.email),userDisplayName:m.name,attestationType:'none',excludeCredentials:keys.map(k=>({id:k.credentialId})),authenticatorSelection:{residentKey:'required',userVerification:'required'},timeout:60000});
