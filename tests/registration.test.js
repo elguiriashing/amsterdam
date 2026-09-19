@@ -52,3 +52,11 @@ test('staff can scan and correct active identity without changing login or membe
  const edit=await api.patch(`/prefills/${id}`).set('Authorization','owner').send({...b,firstName:'Corrected',identityChecked:true,balance:999,memberNumber:1});assert.equal(edit.status,200,JSON.stringify(edit.body));
  const after=await db.collection('members').findOne({registrationId:id});assert.equal(after.name,'Corrected Member');assert.equal(after.password,before.password);assert.equal(after.memberNumber,before.memberNumber);assert.equal(after.balance,0);
 });
+
+test('walk-in scanning needs staff but no pre-existing registration',async()=>{
+ const count=await db.collection('prefills').countDocuments({});
+ assert.equal((await api.post('/staff/scan-id').set('Content-Type','image/jpeg').send(Buffer.from('synthetic'))).status,401);
+ assert.equal((await api.post('/staff/scan-id').set('Authorization','member').set('Content-Type','image/jpeg').send(Buffer.from('synthetic'))).status,403);
+ const scan=await api.post('/staff/scan-id?language=eng').set('Authorization','owner').set('Content-Type','image/jpeg').send(Buffer.from('synthetic'));
+ assert.equal(scan.status,200);assert.equal(scan.body.suggestions.documentNumber,'EXAMPLE123');assert.equal(await db.collection('prefills').countDocuments({}),count);
+});
